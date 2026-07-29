@@ -31,6 +31,8 @@ public sealed class IndexWriter
 {
     private const int  NoPage         = unchecked((int)0xFFFFFFFF);
     private const byte AscStartFlag   = 0x7F;
+    private const byte DescStartFlag  = 0x80;
+    private const byte DescNullFlag   = 0xFF;
     private const byte AscNullFlag    = 0x00;
     /// <summary>
     /// How many levels a descent will follow before treating the tree as corrupt. Jet indexes are
@@ -192,7 +194,7 @@ public sealed class IndexWriter
         int entriesAreaSize = format.PageSize - format.OffsetIndexEntryMask - format.SizeIndexEntryMask;
 
         // A node needs a separator plus a child on each side, so three of these have to fit.
-        int nodeEntrySize = EncodeEntryKey(values).Length + NodeTrailerLen;
+        int nodeEntrySize = EncodeEntryKey(values, index).Length + NodeTrailerLen;
         return nodeEntrySize * 3 > entriesAreaSize;
     }
 
@@ -254,7 +256,7 @@ public sealed class IndexWriter
         if (index.RootPageNumber <= 0) return false;
 
         var    format   = _file.Format;
-        byte[] keyBytes = EncodeEntryKey(values);
+        byte[] keyBytes = EncodeEntryKey(values, index);
 
         var (nodes, leafPage) = DescendPath(index.RootPageNumber, keyBytes);
 
@@ -311,11 +313,19 @@ public sealed class IndexWriter
         }
     }
 
-    /// <summary>Encodes an index entry's key: one value uses the single-column form.</summary>
-    private static byte[] EncodeEntryKey(IReadOnlyList<object?> values)
-        => values.Count == 1 && values[0] is not null
-            ? EncodeKeyBytes(values[0]!)
-            : EncodeCompositeKeyBytes(values);
+    /// <summary>
+    /// Encodes an index entry's key: one value uses the single-column form. When the index is
+    /// known, each column's own direction applies — a descending column sorts inverted, and
+    /// encoding it ascending under a descending flag would leave Access seeking the wrong way.
+    /// </summary>
+    private static byte[] EncodeEntryKey(IReadOnlyList<object?> values, Index? index = null)
+    {
+        var ascending = index?.Columns.Select(c => c.IsAscending).ToList();
+
+        return values.Count == 1 && values[0] is not null
+            ? EncodeKeyBytes(values[0]!, ascending is null || ascending.Count == 0 || ascending[0])
+            : EncodeCompositeKeyBytes(values, ascending);
+    }
 
     public void InsertIntoIndex(TableDefinition table, Index index,
                                 IReadOnlyList<object?> values, int rowPointer)
@@ -328,7 +338,7 @@ public sealed class IndexWriter
         int rootPage = index.RootPageNumber;
         if (rootPage <= 0) return;   // index with no tree to maintain
 
-        int newRoot = InsertIntoTree(rootPage, EncodeEntryKey(values), rowPointer);
+        int newRoot = InsertIntoTree(rootPage, EncodeEntryKey(values, index), rowPointer);
         if (newRoot == 0) return;    // absorbed somewhere below the root
 
         // The root moved, so the TDEF has to point at the new one — this index's own block, not
@@ -966,12 +976,12 @@ public sealed class IndexWriter
 
     // ── Key encoding ──────────────────────────────────────────────────────────
 
-    private static byte[] EncodeKeyBytes(object value)
+    private static byte[] EncodeKeyBytes(object value, bool ascending = true)
     {
-        // Single column: ascending flag + per-type value bytes.
-        byte[] valueBytes = EncodeColumnValueBytes(value);
+        // Single column: start flag for the column's direction + per-type value bytes.
+        byte[] valueBytes = EncodeColumnValueBytes(value, ascending);
         var buf = new byte[1 + valueBytes.Length];
-        buf[0] = AscStartFlag;
+        buf[0] = ascending ? AscStartFlag : DescStartFlag;
         Buffer.BlockCopy(valueBytes, 0, buf, 1, valueBytes.Length);
         return buf;
     }
@@ -989,7 +999,8 @@ public sealed class IndexWriter
     /// table: Access enumerates objects through the ParentIdName index.
     /// </para>
     /// </summary>
-    internal static byte[] EncodeCompositeKeyBytes(IReadOnlyList<object?> values)
+    internal static byte[] EncodeCompositeKeyBytes(IReadOnlyList<object?> values,
+                                                   IReadOnlyList<bool>? ascending = null)
     {
         if (values is null || values.Count == 0)
             throw new ArgumentException("Composite key needs at least one value.", nameof(values));
@@ -998,15 +1009,17 @@ public sealed class IndexWriter
         int total = 0;
         for (int i = 0; i < values.Count; i++)
         {
+            bool asc = ascending is null || i >= ascending.Count || ascending[i];
+
             if (values[i] is null)
             {
-                parts[i] = new[] { AscNullFlag };
+                parts[i] = new[] { asc ? AscNullFlag : DescNullFlag };
             }
             else
             {
-                byte[] valueBytes = EncodeColumnValueBytes(values[i]!);
+                byte[] valueBytes = EncodeColumnValueBytes(values[i]!, asc);
                 parts[i]    = new byte[1 + valueBytes.Length];
-                parts[i][0] = AscStartFlag;
+                parts[i][0] = asc ? AscStartFlag : DescStartFlag;
                 Buffer.BlockCopy(valueBytes, 0, parts[i], 1, valueBytes.Length);
             }
             total += parts[i].Length;
@@ -1026,14 +1039,28 @@ public sealed class IndexWriter
     /// Per-type value-bytes encoder (without the leading ascending flag).
     /// Used by both <see cref="EncodeKeyBytes"/> and <see cref="EncodeCompositeKeyBytes"/>.
     /// </summary>
-    private static byte[] EncodeColumnValueBytes(object value) =>
+    /// <summary>
+    /// A column's key bytes. A descending column sorts by the one's complement of its ascending
+    /// form, which is how the same byte-wise comparison walks it backwards; text carries the
+    /// direction into the collation itself, so it is not complemented again afterwards.
+    /// </summary>
+    private static byte[] EncodeColumnValueBytes(object value, bool ascending = true)
+    {
+        if (value is string s) return GeneralLegacyIndexCodes.EncodeText(s, isAscending: ascending);
+
+        byte[] raw = EncodeAscendingValueBytes(value);
+        if (!ascending)
+            for (int i = 0; i < raw.Length; i++) raw[i] = (byte)~raw[i];
+        return raw;
+    }
+
+    private static byte[] EncodeAscendingValueBytes(object value) =>
         value switch
         {
             byte   v => new[] { v },
             short  v => EncodeAscInt16Bytes(v),
             int    v => EncodeAscInt32Bytes(v),
             long   v => EncodeAscInt64Bytes(v),
-            string s => GeneralLegacyIndexCodes.EncodeText(s, isAscending: true),
             Guid   g => g.ToByteArray(),
             _ => throw new NotSupportedException(
                     $"Primary key encoding for type '{value.GetType().Name}' is not yet supported.")

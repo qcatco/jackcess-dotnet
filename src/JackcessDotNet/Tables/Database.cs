@@ -575,6 +575,17 @@ public sealed class Database : IDisposable
 
     /// <inheritdoc cref="CreateIndex(string, string, string[])"/>
     public Table CreateIndex(string tableName, string indexName, bool unique, params string[] columns)
+        => CreateIndex(tableName, indexName, unique,
+                       Array.ConvertAll(columns ?? Array.Empty<string>(), c => new IndexColumnSpec(c)));
+
+    /// <summary>
+    /// The form that takes a direction per column, for an index that is not all ascending. A
+    /// descending column's key bytes are written inverted, which is how one byte-wise comparison
+    /// walks part of a key backwards.
+    /// </summary>
+    /// <inheritdoc cref="CreateIndex(string, string, string[])"/>
+    public Table CreateIndex(string tableName, string indexName, bool unique,
+                             params IndexColumnSpec[] columns)
     {
         if (string.IsNullOrWhiteSpace(tableName))  throw new ArgumentException("Table name must not be empty.", nameof(tableName));
         if (string.IsNullOrWhiteSpace(indexName))  throw new ArgumentException("Index name must not be empty.", nameof(indexName));
@@ -590,14 +601,14 @@ public sealed class Database : IDisposable
             throw new InvalidOperationException(
                 $"Table '{tableName}' already has an index named '{indexName}'.");
 
-        var columnNumbers = columns.Select(name =>
+        var indexColumns = columns.Select(spec =>
         {
             var col = def.Columns.FirstOrDefault(
-                c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                c => c.Name.Equals(spec.Column, StringComparison.OrdinalIgnoreCase));
             if (col is null)
                 throw new InvalidOperationException(
-                    $"Index column '{name}' not found in table '{tableName}'.");
-            return (short)col.ColumnNumber;
+                    $"Index column '{spec.Column}' not found in table '{tableName}'.");
+            return ((short)col.ColumnNumber, spec.Ascending);
         }).ToList();
 
         // The index needs its own page map before the root page exists, since the map has to
@@ -614,7 +625,7 @@ public sealed class Database : IDisposable
 
         TdefIndexAppender.Append(_file, _allocator, def.TdefPageNumber, new TdefIndexAppender.NewIndex(
             Name:          indexName,
-            ColumnNumbers: columnNumbers,
+            Columns:       indexColumns,
             RootPage:      rootPage,
             UmapPage:      umapPage,
             UmapRow:       0,

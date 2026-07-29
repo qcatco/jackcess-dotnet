@@ -37,7 +37,7 @@ internal static class TdefIndexAppender
     /// <summary>What the new index needs written into it, resolved against the table already.</summary>
     internal sealed record NewIndex(
         string Name,
-        IReadOnlyList<short> ColumnNumbers,
+        IReadOnlyList<(short Number, bool Ascending)> Columns,
         int RootPage,
         int UmapPage,
         int UmapRow,
@@ -129,9 +129,11 @@ internal static class TdefIndexAppender
 
         for (int c = 0; c < MaxIndexColumns; c++)
         {
-            bool used = c < index.ColumnNumbers.Count;
-            ByteUtil.PutShort(page, p, used ? index.ColumnNumbers[c] : ColumnUnused); p += 2;
-            page[p++] = used ? AscendingColumnFlag : (byte)0x00;
+            bool used = c < index.Columns.Count;
+            ByteUtil.PutShort(page, p, used ? index.Columns[c].Number : ColumnUnused); p += 2;
+            // Bit 0 set means ascending; a descending column clears it, and its key bytes are
+            // written inverted to match (see IndexWriter's key encoder).
+            page[p++] = used && index.Columns[c].Ascending ? AscendingColumnFlag : (byte)0x00;
         }
 
         // Usage-map reference: 1-byte row + 3-byte page. Access rejects an indexed table whose
