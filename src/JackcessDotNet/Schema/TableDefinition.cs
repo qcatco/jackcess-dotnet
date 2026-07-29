@@ -156,8 +156,10 @@ public sealed class TableDefinition
                         + idxColBlocks + idxInfoBlocks + idxNameSection
                         + lvalSection + trailerSize;
 
-        // The page buffer is always a full page; content starts at byte 0.
-        var page = new byte[format.PageSize];
+        // Usually one page, but a table with enough columns has a longer definition than that —
+        // Jet allows 255 — and it continues on further pages. The buffer covers the whole thing and
+        // TdefChain lays it out across as many pages as it takes.
+        var page = new byte[Math.Max(format.PageSize, contentSize)];
 
         // ── 8-byte page prefix ────────────────────────────────────────────────
         page[0] = JetFormat.PageTypeTableDef;
@@ -172,7 +174,10 @@ public sealed class TableDefinition
         // bytes that used to follow — a hand-written page[2] = page[3] = 0x00 — overwrote it, so
         // every definition this library produced recorded free space 0 while the code read as
         // though it recorded the real figure.
-        ByteUtil.PutShort(page, 2, (short)(format.PageSize - 8 - contentSize));
+        //
+        // The figure is the room left on the first page, so a definition that spills has none.
+        int firstPageContent = Math.Min(contentSize, format.PageSize - 8);
+        ByteUtil.PutShort(page, 2, (short)(format.PageSize - 8 - firstPageContent));
 
         int pos = 8;
 

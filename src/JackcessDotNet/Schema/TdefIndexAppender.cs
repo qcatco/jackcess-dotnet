@@ -5,7 +5,7 @@ namespace JackcessDotNet;
 
 /// <summary>
 /// Adds one index to a table definition that is already on disk, by splicing the new index's
-/// sections into its TDEF page.
+/// sections into it.
 /// <para>
 /// A TDEF interleaves per-index data with per-column data, so an index is not one contiguous
 /// record that could be appended: its row-count block sits <em>before</em> the column
@@ -44,23 +44,17 @@ internal static class TdefIndexAppender
         bool IsUnique);
 
     /// <summary>
-    /// Rewrites <paramref name="tdefPage"/>'s TDEF to include <paramref name="index"/>.
+    /// Rewrites the table definition rooted at <paramref name="tdefPage"/> to include
+    /// <paramref name="index"/>, extending it onto a continuation page if the new sections no
+    /// longer fit.
     /// </summary>
-    /// <exception cref="NotSupportedException">
-    /// The definition spans more than one page, or the page has no room for the new sections.
-    /// </exception>
-    internal static void Append(PageFile file, int tdefPage, NewIndex index)
+    internal static void Append(PageFile file, PageAllocator allocator, int tdefPage, NewIndex index)
     {
-        var    format = file.Format;
-        byte[] old    = file.ReadPage(tdefPage);
+        var format = file.Format;
 
-        // A definition continued on another page keeps its index sections there, and neither the
-        // reader nor this splicer follows the chain.
-        int nextPage = ByteUtil.GetInt(old, 4);
-        if (nextPage != 0)
-            throw new NotSupportedException(
-                $"Table definition on page {tdefPage} continues on page {nextPage}. Adding an " +
-                "index to a definition that spans several pages is not supported.");
+        // The definition may continue on further pages; work on the whole thing as one buffer and
+        // let TdefChain lay it back out, growing the chain if the new sections no longer fit.
+        var (old, pages) = TdefChain.Read(file, tdefPage);
 
         int numCols       = ByteUtil.GetShort(old, format.TdefOffsetNumCols);
         int numIndexes    = ByteUtil.GetInt(old, format.TdefOffsetNumIndexes);
@@ -71,11 +65,6 @@ internal static class TdefIndexAppender
                          + format.SizeIndexInfoBlock + format.SizeNameLength + nameBytes.Length;
 
         int contentSize = ByteUtil.GetInt(old, 8);
-        if (contentSize + added > format.PageSize - 8)
-            throw new NotSupportedException(
-                $"Table definition on page {tdefPage} has {format.PageSize - 8 - contentSize} " +
-                $"bytes left and the index '{index.Name}' needs {added}. Adding it would spill " +
-                "the definition onto a second page, which is not supported.");
 
         // ── Locate the section boundaries in the existing page ────────────────
         int idxDefStart   = format.SizeTdefHeader;
@@ -100,7 +89,7 @@ internal static class TdefIndexAppender
                 $"(content {contentSize} bytes, sections end at {tailStart}).");
 
         // ── Rebuild, copying every existing byte and appending the new index ──
-        var page = new byte[format.PageSize];
+        var page = new byte[Math.Max(old.Length, contentSize + added)];
         Copy(old, 0, page, 0, format.SizeTdefHeader);   // page prefix + TDEF header
 
         int w = format.SizeTdefHeader;
@@ -125,13 +114,12 @@ internal static class TdefIndexAppender
         ByteUtil.PutInt(page, format.TdefOffsetNumIndexes,    numIndexes + 1);
         ByteUtil.PutInt(page, format.TdefOffsetNumIndexSlots, numIndexSlots + 1);
 
-        // Bytes 2-3 hold the page's remaining free space when the writer filled it in. Tables
-        // this library creates leave it zero, so only adjust a value that is actually there.
-        short freeSpace = ByteUtil.GetShort(page, 2);
-        if (freeSpace > 0)
-            ByteUtil.PutShort(page, 2, (short)Math.Max(0, freeSpace - added));
+        // Bytes 2-3 hold the room left on the *first* page; a definition that spills onto a
+        // continuation page has none.
+        int firstPageContent = Math.Min(contentSize + added, format.PageSize - 8);
+        ByteUtil.PutShort(page, 2, (short)(format.PageSize - 8 - firstPageContent));
 
-        file.WritePage(tdefPage, page);
+        TdefChain.Write(file, allocator, pages, page);
     }
 
     /// <summary>Emits the new index's column block: its columns, usage map, root page and flags.</summary>

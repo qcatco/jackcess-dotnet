@@ -183,7 +183,7 @@ public sealed class SystemCatalog
         int aceTdefPage = FindTableTdefPage(AccessControlTableName);
         if (aceTdefPage < 0) return;   // template has no ACE table — nothing to maintain
 
-        var info   = TdefReader.Read(_file.ReadPage(aceTdefPage), _format);
+        var info   = TdefReader.Read(TdefChain.Read(_file, aceTdefPage).Buffer, _format);
         var aceDef = new TableDefinition(AccessControlTableName, info.Columns)
         {
             TdefPageNumber = aceTdefPage,
@@ -536,8 +536,8 @@ public sealed class SystemCatalog
 
     private TableDefinition BuildCatalogTableDef()
     {
-        byte[] tdefPage = _file.ReadPage(JetFormat.PageSystemCatalog);
-        var    info     = TdefReader.Read(tdefPage, _format);
+        var (tdefPage, _) = TdefChain.Read(_file, JetFormat.PageSystemCatalog);
+        var    info       = TdefReader.Read(tdefPage, _format);
 
         return new TableDefinition("MSysObjects", info.Columns)
         {

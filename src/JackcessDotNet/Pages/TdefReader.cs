@@ -123,32 +123,22 @@ internal static class TdefReader
         }
 
         // ── Index column blocks + slots + names ──────────────────────────────
-        // Wrapped in try/fallback: a TDEF whose index sections spill past the
-        // current page (via the next-TDEF-page pointer at bytes 4-7) would cause
-        // out-of-bounds reads. Multi-page TDEF traversal is a future slice — for
-        // now, bail to the old skip-with-arithmetic behaviour so plan A's reads
-        // continue working.
-        IReadOnlyList<Index> indexes;
         int indexBlocksEnd = pos
             + numIndexes     * format.SizeIndexColumnBlock
             + numIndexSlots  * format.SizeIndexInfoBlock;
 
+        // The caller hands over the whole definition, continuation pages included (see TdefChain),
+        // so the index sections are always present. Falling short means the buffer is not the
+        // definition it claims to be, and quietly reporting no indexes would make a table appear
+        // to have none — which is exactly how appending to a wide table left its indexes alone.
         if (indexBlocksEnd > page.Length)
-        {
-            // Multi-page TDEF: skip past the index sections without parsing them,
-            // matching the pre-step1 behaviour.
-            indexes = Array.Empty<Index>();
-            pos = indexBlocksEnd;
-            for (int i = 0; i < numIndexSlots && pos + format.SizeNameLength <= page.Length; i++)
-            {
-                (_, int consumed) = ReadName(page, pos, format);
-                pos += consumed;
-            }
-        }
-        else
-        {
-            indexes = ParseIndexes(page, format, ref pos, numIndexes, numIndexSlots, columns);
-        }
+            throw new InvalidOperationException(
+                $"Table definition claims {numIndexes} index blocks and {numIndexSlots} slots, " +
+                $"which end at byte {indexBlocksEnd}, but only {page.Length} bytes were supplied. " +
+                "Read the definition with TdefChain so its continuation pages are included.");
+
+        IReadOnlyList<Index> indexes =
+            ParseIndexes(page, format, ref pos, numIndexes, numIndexSlots, columns);
 
         // Read LVAL usage-map refs (4 bytes each: 1-byte row + 3-byte page),
         // one entry per long-value (Memo/OLE) column in column-number order.

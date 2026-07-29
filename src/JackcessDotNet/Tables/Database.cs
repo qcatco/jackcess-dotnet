@@ -527,8 +527,9 @@ public sealed class Database : IDisposable
         }
 
         // 6. Now serialise — the index column block + slot + name will be included.
+        // Lay the definition out across as many pages as it needs; a wide table's runs past one.
         byte[] tdefBytes = tableDef.Serialize(format);
-        _file.WritePage(tdefPage, tdefBytes);
+        TdefChain.Write(_file, _allocator, new[] { tdefPage }, tdefBytes);
 
         // 7. Register the table in MSysObjects.
         _catalog.InsertTableEntry(name, tdefPage);
@@ -599,7 +600,7 @@ public sealed class Database : IDisposable
         UsageMap.AddPage(umap, 0, rootPage, _file.Format, _allocator, _file);
         _file.WritePage(umapPage, umap);
 
-        TdefIndexAppender.Append(_file, def.TdefPageNumber, new TdefIndexAppender.NewIndex(
+        TdefIndexAppender.Append(_file, _allocator, def.TdefPageNumber, new TdefIndexAppender.NewIndex(
             Name:          indexName,
             ColumnNumbers: columnNumbers,
             RootPage:      rootPage,
@@ -627,8 +628,8 @@ public sealed class Database : IDisposable
             throw new InvalidOperationException($"Table '{name}' was not found in this database.");
 
         var format   = _file.Format;
-        var tdefPage = _file.ReadPage(tdefPageNum);
-        var info     = TdefReader.Read(tdefPage, format);
+        var (tdefPage, _) = TdefChain.Read(_file, tdefPageNum);
+        var info          = TdefReader.Read(tdefPage, format);
 
         var tableDef = new TableDefinition(name, info.Columns)
         {
