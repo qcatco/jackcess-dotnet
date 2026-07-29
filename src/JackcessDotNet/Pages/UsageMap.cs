@@ -327,6 +327,65 @@ internal static class UsageMap
     }
 
     /// <summary>
+    /// Clears <paramref name="pageNumber"/> from a usage map, if it is there.
+    /// <para>
+    /// Unlike <see cref="AddPage"/> this never needs to grow anything: a page outside an inline
+    /// window, or outside every bitmap page of a reference map, simply is not in the map, so there
+    /// is nothing to clear and no reason to slide or promote.
+    /// </para>
+    /// </summary>
+    /// <returns>True when a bit was actually cleared.</returns>
+    public static bool RemovePage(byte[] page, int mapRow, int pageNumber, JetFormat format,
+                                  PageFile? file = null)
+    {
+        int rowStart = GetRowStart(page, mapRow, format);
+        int rowLen   = GetRowLength(page, mapRow, format);
+        if (rowLen < 5 || pageNumber < 0) return false;
+
+        if (page[rowStart] == MapTypeReference)
+        {
+            if (file is null) return false;
+            return RemoveFromReferenceMap(page, rowStart, rowLen, pageNumber, format, file);
+        }
+
+        int bitmapLen = rowLen - 5;
+        int startPage = ByteUtil.GetInt(page, rowStart + 1);
+        if (!IsWithinWindow(pageNumber, startPage, bitmapLen)) return false;
+
+        return ClearBit(page, rowStart + 5, pageNumber - startPage);
+    }
+
+    /// <summary>Clears a page from the bitmap page of a reference map that covers it.</summary>
+    private static bool RemoveFromReferenceMap(byte[] page, int rowStart, int rowLen, int pageNumber,
+                                               JetFormat format, PageFile file)
+    {
+        int perBitmapPage = PagesPerBitmapPage(format);
+        int pointerIndex  = pageNumber / perBitmapPage;
+        if (pointerIndex < 0 || pointerIndex >= BitmapPagePointers(rowLen)) return false;
+
+        int bitmapPage = ByteUtil.GetInt(page, rowStart + 1 + pointerIndex * 4);
+        if (bitmapPage <= 0) return false;   // no bitmap page for that range, so nothing is set
+
+        byte[] bitmap = file.ReadPage(bitmapPage);
+        if (!ClearBit(bitmap, RefMapBitmapStart, pageNumber - pointerIndex * perBitmapPage))
+            return false;
+
+        file.WritePage(bitmapPage, bitmap);
+        return true;
+    }
+
+    /// <summary>Clears one bit, reporting whether it had been set.</summary>
+    private static bool ClearBit(byte[] buffer, int bitmapStart, int bitOffset)
+    {
+        int index = bitmapStart + bitOffset / 8;
+        var mask  = (byte)(1 << (bitOffset % 8));
+        if ((buffer[index] & mask) == 0) return false;
+
+        buffer[index] &= (byte)~mask;
+        return true;
+    }
+
+    /// <summary>
     /// Works out where the window would have to start to cover both the pages already in
     /// the map and <paramref name="pageNumber"/>, and whether one bitmap reaches that far.
     /// Also hands back the pages it read, so a caller that goes on to slide or promote

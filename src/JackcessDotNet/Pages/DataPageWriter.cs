@@ -90,17 +90,35 @@ public sealed class DataPageWriter
     {
         int needed = rowDataSize + JetFormat.SizeRowEntry;   // data bytes + one slot
 
-        // Consult the owned-pages usage-map for existing pages with enough room.
-        byte[] umapPage  = _file.ReadPage(tableDef.UmapPageNumber);
-        var    ownedList = UsageMap.GetOwnedPages(umapPage, tableDef.OwnedPagesRow, format, _file);
+        byte[] umapPage = _file.ReadPage(tableDef.UmapPageNumber);
 
-        foreach (int pageNum in ownedList)
+        // A table keeps a second usage map listing just the pages that still have room, which is
+        // what makes finding one cheap. Walking the owned-pages map instead — every page the table
+        // has ever used — read the whole table on every insert, so loading n rows cost O(n²) page
+        // reads. The map is a hint, not a promise: each candidate's own free-space field decides.
+        bool umapChanged = false;
+        foreach (int pageNum in UsageMap.GetOwnedPages(umapPage, tableDef.FreeSpaceRow, format, _file))
         {
-            var   dp        = _file.ReadPage(pageNum);
-            short freeSpace = ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace);
-            if (freeSpace >= needed)
-                return pageNum;
+            byte[] dp = _file.ReadPage(pageNum);
+
+            if (dp[0] == JetFormat.PageTypeData)
+            {
+                short freeSpace = ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace);
+                if (freeSpace >= needed)
+                {
+                    if (umapChanged) _file.WritePage(tableDef.UmapPageNumber, umapPage);
+                    return pageNum;
+                }
+            }
+
+            // A candidate that cannot take this row is dropped, as Jackcess Java does. Keeping it
+            // listed until it is nearly full instead leaves pages with an awkward amount of room in
+            // the map for good, and every later insert pays to read them again — which is the O(n²)
+            // this map exists to avoid. Some space goes unused when row sizes vary; a delete that
+            // empties a page puts it back.
+            umapChanged |= UsageMap.RemovePage(umapPage, tableDef.FreeSpaceRow, pageNum, format, _file);
         }
+        if (umapChanged) _file.WritePage(tableDef.UmapPageNumber, umapPage);
 
         // Ask the usage-map before allocating: allocating extends the file straight away,
         // so a map that cannot record the page must not cost one. (Recording it first
@@ -116,9 +134,33 @@ public sealed class DataPageWriter
                 $"Allocated data page {allocated} but the usage-map was checked for page {newPage}.");
 
         UsageMap.AddPage(umapPage, tableDef.OwnedPagesRow, allocated, format, _allocator, _file);
+
+        // An empty page has room by definition, so it joins the free-space map too — otherwise the
+        // map stays empty and every insert allocates a page of its own.
+        if (UsageMap.CanAddPage(umapPage, tableDef.FreeSpaceRow, allocated, format, out _))
+            UsageMap.AddPage(umapPage, tableDef.FreeSpaceRow, allocated, format, _allocator, _file);
+
         _file.WritePage(tableDef.UmapPageNumber, umapPage);
 
         return allocated;
+    }
+
+    /// <summary>
+    /// Puts a page back on the free-space map, for a page that has just regained room. Absent-check
+    /// first: adding a page already listed is harmless to the bitmap but writes the map again.
+    /// </summary>
+    private void ListAsFree(TableDefinition table, int dataPage)
+    {
+        var    format   = _file.Format;
+        byte[] umapPage = _file.ReadPage(table.UmapPageNumber);
+
+        if (UsageMap.GetOwnedPages(umapPage, table.FreeSpaceRow, format, _file).Contains(dataPage))
+            return;
+        if (!UsageMap.CanAddPage(umapPage, table.FreeSpaceRow, dataPage, format, out _))
+            return;
+
+        UsageMap.AddPage(umapPage, table.FreeSpaceRow, dataPage, format, _allocator, _file);
+        _file.WritePage(table.UmapPageNumber, umapPage);
     }
 
     private int WriteRowOnPage(int pageNumber, byte[] rowData, int tdefPageNumber, JetFormat format)
@@ -322,6 +364,155 @@ public sealed class DataPageWriter
 
         throw new InvalidOperationException(
             $"No row with {columnName} = '{value}' found in table '{table.Name}'.");
+    }
+
+    // ── Pointer-addressed variants ────────────────────────────────────────────
+
+    /// <summary>
+    /// Deletes the row at <paramref name="rowPointer"/> — <c>(page &lt;&lt; 16) | rowIndex</c>, as
+    /// <see cref="InsertRow"/> returns and an index entry stores — freeing its LVAL chains and
+    /// marking the slot deleted. Returns the row as it was, which the caller needs to take its
+    /// index entries out. The TDEF row count is the caller's job.
+    /// <para>
+    /// This exists so a caller holding a pointer does not pay for the linear scan
+    /// <see cref="DeleteRow"/> does: an index seek already knows exactly which slot to free.
+    /// </para>
+    /// </summary>
+    /// <returns>The deleted row, or <c>null</c> when the slot holds nothing usable.</returns>
+    public Row? DeleteRowAt(TableDefinition table, int rowPointer)
+    {
+        if (table is null) throw new ArgumentNullException(nameof(table));
+
+        var decoder = DecoderFor(table);
+        var located  = LocateRow(table, rowPointer, decoder);
+        if (located is null) return null;
+
+        var (page, pageNum, slotOffset, slotVal, rowBytes) = located.Value;
+
+        var row = new Row();
+        foreach (var col in table.Columns)
+        {
+            object? v = decoder.Decode(rowBytes, col);
+            if (v is not null) row[col.Name] = v;
+        }
+
+        FreeRowLvalChains(rowBytes, decoder);
+        ByteUtil.PutUShort(page, slotOffset, (ushort)(slotVal | 0x8000u));
+        _file.WritePage(pageNum, page);
+
+        ReclaimIfEmptied(table, pageNum);
+        return row;
+    }
+
+    /// <summary>
+    /// Resets a data page and puts it back on the free-space map once every row on it is deleted.
+    /// <para>
+    /// Deleting a row only flags its slot; the bytes stay where they are and the page's free-space
+    /// field does not move, so that space is not reusable. Reclaiming it properly means compacting
+    /// the page — sliding the surviving rows together and rewriting the slot table — which is not
+    /// done. But a page with nothing left on it needs no compaction: it can go back to empty as a
+    /// whole, which covers deleting a batch of rows and is what lets a file that churns stop growing
+    /// without bound.
+    /// </para>
+    /// </summary>
+    private void ReclaimIfEmptied(TableDefinition table, int pageNum)
+    {
+        var    format = _file.Format;
+        byte[] page   = _file.ReadPage(pageNum);
+        int    rows   = ByteUtil.GetShort(page, format.OffsetDataNumRows);
+        if (rows == 0) return;
+
+        for (int r = 0; r < rows; r++)
+        {
+            ushort slot = ByteUtil.GetUShort(
+                page, format.OffsetDataRowTable + r * JetFormat.SizeRowEntry);
+            if ((slot & 0x8000) == 0) return;   // a live row remains
+        }
+
+        // Rewrite as an empty data page belonging to the same table.
+        Array.Clear(page, 0, page.Length);
+        page[0] = JetFormat.PageTypeData;
+        ByteUtil.PutShort(page, JetFormat.OffsetDataFreeSpace, (short)format.DataPageInitialFreeSpace);
+        ByteUtil.PutInt(page, JetFormat.OffsetDataTdefPage, table.TdefPageNumber);
+        _file.WritePage(pageNum, page);
+
+        ListAsFree(table, pageNum);
+    }
+
+    /// <summary>
+    /// Overlays <paramref name="newValues"/> onto the row at <paramref name="rowPointer"/> and
+    /// rewrites it, returning the row as it was, the merged row, and the pointer the merged row
+    /// now lives at. The old slot is marked deleted, as Jet does for an update that moves a row.
+    /// </summary>
+    public (Row Before, Row After, int NewRowPointer)? UpdateRowAt(
+        TableDefinition table, int rowPointer, Row newValues)
+    {
+        if (table     is null) throw new ArgumentNullException(nameof(table));
+        if (newValues is null) throw new ArgumentNullException(nameof(newValues));
+
+        var decoder = DecoderFor(table);
+        var located = LocateRow(table, rowPointer, decoder);
+        if (located is null) return null;
+
+        var (page, pageNum, slotOffset, slotVal, rowBytes) = located.Value;
+
+        var before = new Row();
+        foreach (var col in table.Columns)
+        {
+            object? v = decoder.Decode(rowBytes, col);
+            if (v is not null) before[col.Name] = v;
+        }
+
+        var after = new Row();
+        foreach (var kvp in before)    after[kvp.Key] = kvp.Value;
+        foreach (var kvp in newValues) after[kvp.Key] = kvp.Value;
+
+        FreeRowLvalChains(rowBytes, decoder);
+        ByteUtil.PutUShort(page, slotOffset, (ushort)(slotVal | 0x8000u));
+        _file.WritePage(pageNum, page);
+
+        return (before, after, InsertRow(table, after));
+    }
+
+    private RowDecoder DecoderFor(TableDefinition table)
+        => new RowDecoder(_file.Format, table.Columns,
+                          table.LvalColumnUmapPages.Count > 0 ? new LvalReader(_file) : null);
+
+    /// <summary>
+    /// Resolves a row pointer to its page, slot and raw bytes. Returns null when the slot is
+    /// deleted, an overflow pointer, or out of range — a stale index entry can point at any of
+    /// those, and following one blindly would corrupt an unrelated row.
+    /// </summary>
+    private (byte[] Page, int PageNum, int SlotOffset, ushort SlotVal, byte[] RowBytes)? LocateRow(
+        TableDefinition table, int rowPointer, RowDecoder decoder)
+    {
+        var format  = _file.Format;
+        int pageNum = (rowPointer >> 16) & 0xFFFFFF;
+        int rowIdx  = rowPointer & 0xFF;
+        if (pageNum <= 0) return null;
+
+        byte[] page = _file.ReadPage(pageNum);
+        if (page[0] != JetFormat.PageTypeData) return null;
+
+        int rowCount = ByteUtil.GetShort(page, format.OffsetDataNumRows);
+        if (rowIdx < 0 || rowIdx >= rowCount) return null;
+
+        int    slotOffset = format.OffsetDataRowTable + rowIdx * JetFormat.SizeRowEntry;
+        ushort slotVal    = ByteUtil.GetUShort(page, slotOffset);
+        if ((slotVal & 0x8000) != 0) return null;   // already deleted
+        if ((slotVal & 0x4000) != 0) return null;   // overflow pointer
+
+        int rowStart = slotVal & JetFormat.RowOffsetMask;
+        int rowEnd   = rowIdx == 0
+            ? format.PageSize
+            : ByteUtil.GetUShort(page, format.OffsetDataRowTable + (rowIdx - 1) * JetFormat.SizeRowEntry)
+              & JetFormat.RowOffsetMask;
+        int rowLen = rowEnd - rowStart;
+        if (rowLen <= 0) return null;
+
+        var rowBytes = new byte[rowLen];
+        Array.Copy(page, rowStart, rowBytes, 0, rowLen);
+        return (page, pageNum, slotOffset, slotVal, rowBytes);
     }
 
     // ── Shared helpers ────────────────────────────────────────────────────────

@@ -230,33 +230,83 @@ public sealed class Table
     public void UpdateByPrimaryKey(object primaryKeyValue, Row newValues)
     {
         string? pkColumn = _definition.PrimaryKeyColumnName;
+        if (pkColumn is null)
+        {
+            _dataWriter.UpdateRowByPrimaryKey(_definition, primaryKeyValue, newValues);
+            return;
+        }
 
-        // The row as it stands, so its old index entries can be taken out: an update rewrites the
-        // row at a new pointer and may change an indexed value, which leaves every index holding a
-        // key that is either at the wrong place or simply wrong.
-        var before = pkColumn is not null ? FindRowWithPointer(pkColumn, primaryKeyValue) : null;
+        int? rowPtr = ResolveRowPointer(pkColumn, primaryKeyValue);
+        if (rowPtr is null)
+            throw new InvalidOperationException(
+                $"No row with primary key '{primaryKeyValue}' found in table '{Name}'.");
 
-        _dataWriter.UpdateRowByPrimaryKey(_definition, primaryKeyValue, newValues);
+        // One lookup gives both versions of the row: an update rewrites it at a new pointer and may
+        // change an indexed value, so every index needs the old entry out and the new one in.
+        var updated = _dataWriter.UpdateRowAt(_definition, rowPtr.Value, newValues);
+        if (updated is null)
+            throw new InvalidOperationException(
+                $"The row for primary key '{primaryKeyValue}' in table '{Name}' could not be read " +
+                $"back at the pointer it was found at (p{(rowPtr.Value >> 16) & 0xFFFFFF}, " +
+                $"slot {rowPtr.Value & 0xFF}); nothing was updated.");
 
-        if (before is not null) RemoveIndexEntries(before.Value.Row, before.Value.RowPointer);
-
-        // Re-read rather than merge by hand: the row that was written is the old one overlaid with
-        // newValues, and the indexes have to describe exactly that.
-        var after = pkColumn is not null ? FindRowWithPointer(pkColumn, primaryKeyValue) : null;
-        if (after is not null) AddIndexEntries(after.Value.Row, after.Value.RowPointer, new HashSet<int>());
+        var (before, after, newRowPtr) = updated.Value;
+        RemoveIndexEntries(before, rowPtr.Value);
+        AddIndexEntries(after, newRowPtr, new HashSet<int>());
     }
 
     /// <summary>
-    /// The first row whose <paramref name="columnName"/> equals <paramref name="value"/>, with its
-    /// row pointer — the same order <see cref="DataPageWriter"/> scans in, so both agree on which
-    /// row "first" is.
+    /// The row pointer of the first row whose <paramref name="columnName"/> equals
+    /// <paramref name="value"/>.
+    /// <para>
+    /// Seeks through a single-column index on that column when there is one, which is three or four
+    /// page reads instead of reading every data page in the table. A composite index is no use
+    /// here — its entries are keyed on all of its columns at once — and without a usable index this
+    /// falls back to the scan.
+    /// </para>
     /// </summary>
-    private (Row Row, int RowPointer)? FindRowWithPointer(string columnName, object value)
+    private int? ResolveRowPointer(string columnName, object value)
     {
+        var ix = IndexesForMaintenance().FirstOrDefault(
+            i => i.RootPageNumber > 0
+              && i.Columns.Count == 1
+              && i.Columns[0].Column.Name.Equals(columnName, StringComparison.OrdinalIgnoreCase));
+
+        if (ix is not null)
+        {
+            var cursor = NewCursorInternal();
+            foreach (int rowPtr in new IndexReader(_file, ix).FindRowPointers(value))
+            {
+                // An index can hold an entry whose row no longer matches — an older file written
+                // before delete kept indexes in step, for one — so the row is checked, not trusted.
+                Row? row;
+                try { row = cursor.ReadRowAt((rowPtr >> 16) & 0xFFFFFF, rowPtr & 0xFF); }
+                catch { continue; }
+
+                if (row is not null && row.TryGetValue(columnName, out object? stored)
+                    && ValuesMatch(stored, value))
+                    return rowPtr;
+            }
+            // An index that yielded nothing usable is not proof of absence, so fall through.
+        }
+
         foreach (var (row, rowPtr) in EnumerateRowsWithPointers())
-            if (row.TryGetValue(columnName, out object? stored) && Equals(stored, value))
-                return (row, rowPtr);
+            if (row.TryGetValue(columnName, out object? stored) && ValuesMatch(stored, value))
+                return rowPtr;
+
         return null;
+    }
+
+    /// <summary>
+    /// Compares a stored value with a caller's, tolerating numeric width — a key read back as
+    /// <c>long</c> or <c>decimal</c> still matches the <c>int</c> it was written from.
+    /// </summary>
+    private static bool ValuesMatch(object? stored, object? requested)
+    {
+        if (Equals(stored, requested)) return true;
+        if (stored is null || requested is null) return false;
+        try { return Convert.ToDecimal(stored) == Convert.ToDecimal(requested); }
+        catch { return false; }
     }
 
     /// <summary>
@@ -364,13 +414,22 @@ public sealed class Table
     /// </summary>
     public void DeleteRow(string columnName, object value)
     {
-        // Read the row before it goes, since its values are what the index entries were built from.
-        var doomed = FindRowWithPointer(columnName, value);
+        int? rowPtr = ResolveRowPointer(columnName, value);
+        if (rowPtr is null)
+            throw new InvalidOperationException(
+                $"No row with {columnName} = '{value}' found in table '{Name}'.");
 
-        _dataWriter.DeleteRow(_definition, columnName, value);
+        // Deleting by pointer hands back the row as it was, which is what the index entries were
+        // built from — so one lookup covers both the delete and the index upkeep.
+        Row? deleted = _dataWriter.DeleteRowAt(_definition, rowPtr.Value);
+        if (deleted is null)
+            throw new InvalidOperationException(
+                $"The row for {columnName} = '{value}' in table '{Name}' could not be read back at " +
+                $"the pointer it was found at (p{(rowPtr.Value >> 16) & 0xFFFFFF}, " +
+                $"slot {rowPtr.Value & 0xFF}); nothing was deleted.");
+
         _dataWriter.IncrementTdefRowCount(_definition.TdefPageNumber, -1);
-
-        if (doomed is not null) RemoveIndexEntries(doomed.Value.Row, doomed.Value.RowPointer);
+        RemoveIndexEntries(deleted, rowPtr.Value);
     }
 
     /// <summary>

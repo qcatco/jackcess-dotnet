@@ -35,10 +35,20 @@ public sealed class PageFile : IDisposable
         _stream = new FileStream(path, mode, access, FileShare.ReadWrite);
     }
 
+    /// <summary>
+    /// How many pages have been read through this instance. Every operation's cost here is page
+    /// reads, so this is the honest measure of one — a lookup that seeks an index touches three or
+    /// four pages where a table scan touches every data page, and only a counter tells the two
+    /// apart from the outside.
+    /// </summary>
+    public long PagesRead { get; private set; }
+
     public byte[] ReadPage(int pageNumber)
     {
         if (pageNumber < 0)
             throw new ArgumentOutOfRangeException(nameof(pageNumber));
+
+        PagesRead++;
 
         long offset = (long)pageNumber * _format.PageSize;
         if (offset + _format.PageSize > _stream.Length)

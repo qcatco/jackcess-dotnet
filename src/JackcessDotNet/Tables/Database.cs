@@ -19,6 +19,10 @@ namespace JackcessDotNet;
 public sealed class Database : IDisposable
 {
     private readonly PageFile      _file;
+
+    /// <summary>The paged file behind this database — its <see cref="PageFile.PagesRead"/> is how
+    /// the cost of an operation is measured.</summary>
+    internal PageFile File => _file;
     private readonly PageAllocator _allocator;
     private readonly SystemCatalog _catalog;
     private IReadOnlyList<Relationship>? _relsCache;
