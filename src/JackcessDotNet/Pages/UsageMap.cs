@@ -33,8 +33,17 @@ internal static class UsageMap
     ///   row 0 = owned-pages map
     ///   row 1 = free-space map
     /// </summary>
-    public static byte[] CreateUmapPage(JetFormat format)
+    /// <param name="rowCount">
+    /// How many inline maps the page carries. A table needs two (owned pages, free space) and
+    /// one more per index — Access keeps an index's usage map as a further row of the same
+    /// page, and an index whose map reference is blank leaves Access unable to read the table.
+    /// </param>
+    public static byte[] CreateUmapPage(JetFormat format, int rowCount = 2)
     {
+        if (rowCount < 2)
+            throw new ArgumentOutOfRangeException(nameof(rowCount),
+                "A usage-map page always carries at least the owned-pages and free-space maps.");
+
         int bitmapSize = format.UmapInlineBitmapSize;
         int rowDataSize = 1 + 4 + bitmapSize;   // MAP_TYPE + startPage + bitmap
         var page = new byte[format.PageSize];
@@ -48,27 +57,22 @@ internal static class UsageMap
         page[1] = 0x01;
         // bytes 4-7 are 0 (no owning TDEF)
 
-        // Write two rows, packed from the end of the page
-        int cursor = format.PageSize;
+        // Rows are packed from the end of the page, so row 0 sits at the highest address:
+        // row 0 = owned pages, row 1 = free space, row 2+ = one per index.
+        int cursor    = format.PageSize;
+        int lastStart = cursor;
 
-        // Row 0 (owned pages) – written first = at higher address
-        cursor -= rowDataSize;
-        int row0Start = cursor;
-        page[row0Start] = MapTypeInline;   // MAP_TYPE
-        // start-page = 0, bitmap = all zeros (already zeroed)
+        for (int row = 0; row < rowCount; row++)
+        {
+            cursor -= rowDataSize;
+            lastStart = cursor;
+            page[cursor] = MapTypeInline;   // start page 0, bitmap already zeroed
+            ByteUtil.PutShort(page, format.OffsetDataRowTable + row * JetFormat.SizeRowEntry,
+                              (short)cursor);
+        }
 
-        // Row 1 (free-space pages) – written second = at lower address
-        cursor -= rowDataSize;
-        int row1Start = cursor;
-        page[row1Start] = MapTypeInline;
-
-        // Slot table at OffsetDataRowTable (Jet3=10, Jet4=14)
-        ByteUtil.PutShort(page, format.OffsetDataRowTable,                   (short)row0Start);
-        ByteUtil.PutShort(page, format.OffsetDataRowTable + JetFormat.SizeRowEntry, (short)row1Start);
-
-        // Row count and free space
-        ByteUtil.PutShort(page, format.OffsetDataNumRows, 2);
-        int freeSpace = row1Start - format.OffsetDataRowTable - 2 * JetFormat.SizeRowEntry;
+        ByteUtil.PutShort(page, format.OffsetDataNumRows, (short)rowCount);
+        int freeSpace = lastStart - format.OffsetDataRowTable - rowCount * JetFormat.SizeRowEntry;
         ByteUtil.PutShort(page, JetFormat.OffsetDataFreeSpace, (short)freeSpace);
 
         return page;

@@ -17,14 +17,30 @@ public sealed class Index
     /// <summary>Columns participating in the sort key, in declaration order.</summary>
     public IReadOnlyList<IndexColumn> Columns { get; }
 
-    /// <summary>Page number of the index's root page (node or leaf).</summary>
-    public int RootPageNumber { get; }
+    /// <summary>
+    /// Page number of the index's root page (node or leaf). Updated in place when an insert
+    /// splits the root and a new level is promoted above it, so an in-memory definition stays
+    /// usable after the TDEF has been patched.
+    /// </summary>
+    public int RootPageNumber { get; internal set; }
 
     /// <summary>
-    /// Ordinal of this index inside the TDEF (matches the index slot's
-    /// <c>indexDataNumber</c>, which the foreign-key reference points at).
+    /// The slot's logical index number — what a foreign-key reference in another table's
+    /// TDEF points at. This is <em>not</em> a position in any array; see
+    /// <see cref="IndexDataNumber"/> for the one that is.
     /// </summary>
     public int IndexNumber { get; }
+
+    /// <summary>
+    /// Which index-data block in the TDEF holds this index's tree: the position of its
+    /// row-count block (in the section before the columns) and of its column block (in the
+    /// section after them). Several logical indexes may share one data block, and the slot
+    /// order need not match the block order — Access commonly writes the primary key as the
+    /// last slot while its tree lives in the first block. Anything that seeks a per-index
+    /// field inside the TDEF must offset by this, never by the index's position in
+    /// <see cref="TableDefinition.Indexes"/>.
+    /// </summary>
+    public int IndexDataNumber { get; }
 
     /// <summary>Raw index-flags byte from the index column block.</summary>
     public byte Flags { get; }
@@ -39,14 +55,18 @@ public sealed class Index
     public bool IsRequired   => (Flags & 0x08) != 0;
 
     internal Index(string name, IReadOnlyList<IndexColumn> columns, int rootPageNumber,
-                   int indexNumber, byte flags, byte indexType)
+                   int indexNumber, byte flags, byte indexType, int indexDataNumber = 0)
     {
-        Name           = name;
-        Columns        = columns;
-        RootPageNumber = rootPageNumber;
-        IndexNumber    = indexNumber;
-        Flags          = flags;
-        IndexType      = indexType;
+        Name            = name;
+        Columns         = columns;
+        RootPageNumber  = rootPageNumber;
+        IndexNumber     = indexNumber;
+        Flags           = flags;
+        IndexType       = indexType;
+        // Only the TDEF reader builds real index metadata, and it always knows the block; the
+        // default covers the single-index definitions tests hand-assemble, where slot 0's tree
+        // is necessarily block 0.
+        IndexDataNumber = indexDataNumber;
     }
 
     public override string ToString()

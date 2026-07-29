@@ -259,7 +259,8 @@ internal static class TdefReader
                 rootPageNumber: data.RootPageNumber,
                 indexNumber:    slot.IndexNumber,
                 flags:          data.Flags,
-                indexType:      slot.IndexType));
+                indexType:      slot.IndexType,
+                indexDataNumber:slot.IndexDataNumber));
         }
         return indexes;
     }

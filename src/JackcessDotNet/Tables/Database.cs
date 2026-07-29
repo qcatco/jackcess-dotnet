@@ -472,8 +472,10 @@ public sealed class Database : IDisposable
         // 1. Allocate the TDEF page (content written in step 3).
         int tdefPage = _allocator.AllocatePage();
 
-        // 2. Allocate the usage-map page (owned pages + free-space maps).
-        int umapPage = _allocator.AllocateUmapPage();
+        // 2. Allocate the usage-map page: rows 0 and 1 are the table's owned-pages and
+        //    free-space maps, and a primary-key index needs a third row for its own map.
+        bool willHaveIndex = pkColumns is { Count: > 0 };
+        int umapPage = _allocator.AllocateUmapPage(willHaveIndex ? 3 : 2);
 
         // 3. Allocate a LVAL usage-map page for each Memo/OLE column (must happen before
         //    Serialize so the page numbers can be embedded in the TDEF).
@@ -506,6 +508,14 @@ public sealed class Database : IDisposable
         {
             var idxWriter = new IndexWriter(_file, _allocator);
             tableDef.PrimaryKeyIndexPage = idxWriter.CreatePrimaryKeyIndex(tableDef, pkColumns);
+            tableDef.IndexUmapRow        = 2;
+
+            // Record the index's root page in its own usage map, so the map describes the
+            // index's pages rather than sitting empty.
+            byte[] idxUmap = _file.ReadPage(umapPage);
+            UsageMap.AddPage(idxUmap, tableDef.IndexUmapRow, tableDef.PrimaryKeyIndexPage,
+                             format, _allocator, _file);
+            _file.WritePage(umapPage, idxUmap);
             if (pkColumns.Count == 1)
                 tableDef.PrimaryKeyColumnName = pkColumns[0];
             else

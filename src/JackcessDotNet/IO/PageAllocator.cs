@@ -71,11 +71,14 @@ public sealed class PageAllocator
     /// Allocates a new Usage-Map page (type 0x05) with two empty inline maps
     /// (owned-pages map at row 0, free-space map at row 1), and returns its page number.
     /// </summary>
-    public int AllocateUmapPage()
+    /// <param name="rowCount">
+    /// Inline maps to carry: two for the table (owned pages, free space) plus one per index.
+    /// </param>
+    public int AllocateUmapPage(int rowCount = 2)
     {
         var format     = _file.Format;
         int pageNumber = AllocatePage();
-        _file.WritePage(pageNumber, UsageMap.CreateUmapPage(format));
+        _file.WritePage(pageNumber, UsageMap.CreateUmapPage(format, rowCount));
         return pageNumber;
     }
 }

@@ -22,6 +22,8 @@ public sealed class TableDefinition
     private const byte    AscendingColumnFlag     = 0x01;
     // Per-index index-data-flags byte (per Jackcess IndexData)
     private const byte    UniqueIndexFlag         = 0x01;
+    /// <summary>Index disallows null components — Access sets it on a primary key.</summary>
+    private const byte    RequiredIndexFlag       = 0x08;
     private const byte    UnknownIndexFlag        = 0x80;   // always set on Access 2000+ indexes
     // Index slot's index-type byte
     private const byte    PrimaryKeyIndexType     = 0x01;
@@ -45,6 +47,13 @@ public sealed class TableDefinition
     // ── Primary-key index (optional) ─────────────────────────────────────────
     /// <summary>Page number of the primary key index leaf page (0 if no primary key index).</summary>
     public int     PrimaryKeyIndexPage   { get; set; }
+
+    /// <summary>
+    /// Row of <see cref="UmapPageNumber"/> holding the primary-key index's usage map, or -1
+    /// when the table has no index. Rows 0 and 1 are the table's own owned-pages and
+    /// free-space maps, so an index's map starts at row 2.
+    /// </summary>
+    public int     IndexUmapRow          { get; set; } = -1;
     /// <summary>
     /// Name of the primary key column for single-column PKs (null when there's
     /// no PK <i>or</i> the PK is composite). For composite PKs use
@@ -317,17 +326,29 @@ public sealed class TableDefinition
                     page[p++] = 0x00;
                 }
             }
-            // UsageMap ref (4 bytes: row + 3-byte page) — empty for us.
-            p += 4;
+            // Usage-map reference: 1-byte row + 3-byte page. An index has its own map, kept as
+            // a further row of the table's usage-map page. Leaving this blank is what made
+            // Access reject an indexed table outright ("Not a valid bookmark") — it could not
+            // find the index's page map, however few rows the table had.
+            page[p++] = (byte)(IndexUmapRow >= 0 ? IndexUmapRow : 0);
+            ByteUtil.Put3ByteInt(page, p, IndexUmapRow >= 0 ? UmapPageNumber : 0); p += 3;
+
             // Root page = PK index leaf page.
             ByteUtil.PutInt(page, p, PrimaryKeyIndexPage); p += 4;
             p += format.SkipBeforeIndexFlags;
-            page[p++] = (byte)(UnknownIndexFlag | UniqueIndexFlag);
+            // A primary key is unique *and* required — Access writes 0x89 here, and we were
+            // writing 0x81.
+            page[p++] = (byte)(UnknownIndexFlag | UniqueIndexFlag | RequiredIndexFlag);
             // SkipAfterIndexFlags absorbed by the block-size advance below.
             pos = blockStart + format.SizeIndexColumnBlock;
 
-            // Logical-index slot block.
+            // Logical-index slot block. Access and Jackcess both open it with the same magic
+            // table number the column definitions carry. Leaving those four bytes zero still
+            // allowed seeks and range scans through the index, but Access could not answer
+            // COUNT(*) or MAX(...) from it — those failed with "Invalid argument".
             int slotStart = pos;
+            if (format.SkipBeforeIndexSlot >= 4)
+                ByteUtil.PutInt(page, slotStart, MagicTableNumber);
             p = pos + format.SkipBeforeIndexSlot;
             ByteUtil.PutInt(page, p, 0);                   p += 4;   // indexNumber
             ByteUtil.PutInt(page, p, 0);                   p += 4;   // indexDataNumber

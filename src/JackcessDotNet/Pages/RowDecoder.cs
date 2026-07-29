@@ -246,6 +246,11 @@ internal sealed class RowDecoder
             DataType.Money        => Math.Round((decimal)ByteUtil.GetLong(row, offset) / 10000m, 4),
             DataType.Guid         => new Guid(row[offset..(offset + 16)]),
         DataType.Numeric      => DecodeNumeric(row, offset, col),
+        // A complex column (multi-value field, attachment, version history) stores a
+        // 4-byte id in the row; the values themselves live in a separate flat table.
+        // Surfacing the id is what lets Table.GetComplexValues find them — before this
+        // the column silently disappeared from every row.
+        DataType.Complex      => ByteUtil.GetInt   (row, offset),
         _                     => null
     };
 

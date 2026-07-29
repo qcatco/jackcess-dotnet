@@ -142,6 +142,9 @@ materialising the whole table.
 | Row CRUD + B-tree indexes (single-column PK)      | ✅      |
 | **Files and tables Microsoft Access can open**    | ✅ Both paths verified against the ACE engine³ |
 | Appending into large existing files               | ✅ Inline usage-map window slides, then promotes to a reference map² |
+| Maintaining *every* index of a table on insert    | ✅ Including leaf splits in trees Access wrote⁴ |
+| Creating secondary indexes                        | ❌ Not yet — only a primary key |
+| Reading complex columns (multi-value, attachment, memo history) | ✅ `Table.GetComplexValues` |
 | Memo / OLE long values                            | ✅      |
 | PropertyMap & MSysRelationships                   | ✅      |
 | Password-protected `.mdb` (Jet RC4 codec)         | ✅      |
@@ -159,6 +162,15 @@ materialising the whole table.
 into a table an Access-authored file already contains. Before 2.2.0 the first was
 unreadable by Access and the second garbled Latin-1 text — see the 2.2.0 entry in
 CHANGELOG.md for the five on-disk details involved.
+
+⁴ Access reads through indexes, so a row absent from one does not exist as far as
+Access is concerned even though a page scan still returns it. Every index of the table
+takes an entry, each index's entry count is kept current (Access answers `COUNT(*)` and
+`MAX` from an index), and a full leaf splits correctly — including in a tree Access
+wrote, which needs the new root recorded against the right index-data block rather than
+the right *slot*; the two are ordered independently. Two cases still throw rather than
+risk an index: a page Access prefix-compressed, and a split needing a third level.
+`Table.ForceIgnoreIndexCheck` inserts anyway and leaves that index short.
 
 ² A table's data pages are tracked in a usage map whose inline bitmap addresses a
 fixed window — as little as 512 pages (~2 MB) in Access-authored files. The window

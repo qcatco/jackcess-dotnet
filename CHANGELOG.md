@@ -4,6 +4,62 @@ All notable changes to JackcessDotNet are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0]
+
+Where 2.2.0 made a table this library *creates* readable by Access, this release makes
+appending to a table **Access already built** keep that table's indexes correct. Access
+reaches rows through its indexes, so a row missing from one does not exist as far as
+Access is concerned even though a page scan still returns it. Verified by appending to
+files the ACE engine wrote and querying the results back through
+`Microsoft.ACE.OLEDB.12.0` — seeks, ranges, ordered walks and aggregates.
+
+### Fixed
+
+- **A split index recorded its new root against the wrong index.** Access does not order
+  a TDEF's index-data blocks to match its index slots — in `common1V2000.mdb` the primary
+  key is the second slot but owns the first block, and one file can even point two logical
+  indexes at a single block. Every per-index field was addressed by the index's position in
+  `Table.Indexes` instead, so when a leaf split promoted a new root, the root-page field of
+  a *different* index was overwritten: a table's primary key ended up pointing at the
+  secondary index's tree, holding collated text where Access expected a 4-byte Long. Access
+  could still count and aggregate — those walk the tree without comparing keys — but every
+  seek through either index failed, which is what the refusal below was standing in for.
+  `Index.IndexDataNumber` now carries the block, and nothing addresses a block by slot.
+- **Two logical indexes sharing one tree got two entries.** Access points a foreign-key
+  index and a primary key at the same index-data block when they cover the same columns.
+  Maintaining them per slot inserted the same key twice into the one tree; each block is now
+  maintained once.
+- **Index entry counts were not maintained.** Access answers `COUNT(*)` and `MAX(…)` from an
+  index rather than by scanning, and a count of zero against a tree that does hold entries
+  makes it fail those with "Invalid argument" even though a seek through the same index
+  works.
+- **Rows were threaded only into the primary-key index.** Appending 500 rows to an
+  Access-authored table left Access reporting one row — its own — for anything that used
+  another index.
+
+### Added
+
+- **Reading complex columns** — multi-value fields, attachment fields and append-only memo
+  history, via `Table.GetComplexValues(row, columnName)`. The row stores a 4-byte id;
+  `MSysComplexColumns` maps the column to its flat table, and the returned rows are that
+  table's, so the shape follows the kind of complex column.
+- **`Index.IndexDataNumber`** — which index-data block in the TDEF holds an index's tree.
+- **`Table.ForceIgnoreIndexCheck`** and **`ImportOptions.ForceIgnoreIndexCheck`** — opt out
+  of the refusal below and keep inserting, leaving that index without the new entries.
+  Access may then under-report rows for queries that use it.
+
+### Changed
+
+- **A leaf split is no longer refused.** It is written in Access's own shape, in a tree this
+  library grew and in one Access wrote. What still throws is narrower: a page Access
+  *prefix-compressed*, and a split that would need a third level (its new parent entry does
+  not fit in the root node — splitting a node is not written yet).
+- **Breaking:** `IndexWriter.InsertIntoIndex`, `WouldExceedIndexCapacity` and
+  `IncrementIndexRowCount` take an `Index` rather than an `int` ordinal, so a slot position
+  can no longer be passed where a block number belongs. `IncrementIndexRowCountForDataBlock`
+  covers the one case with no `Index` to hand: a table created in the current session, whose
+  TDEF blocks have not been read back yet.
+
 ## [2.2.0]
 
 Everything here is one theme: **files this library writes are now readable by

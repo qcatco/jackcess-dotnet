@@ -114,15 +114,22 @@ public sealed class SystemCatalog
     /// </summary>
     private void MaintainIndexes(TableDefinition def, Row row, int rowPointer)
     {
+        // MSysObjects declares several indexes, and two of them can share one tree — take each
+        // index-data block once (see Table.AddIndexEntries).
+        var maintained = new HashSet<int>();
+
         foreach (var ix in def.Indexes)
         {
             if (ix.RootPageNumber <= 0 || ix.Columns.Count == 0) continue;
+            if (!maintained.Add(ix.IndexDataNumber)) continue;
 
             var values = new List<object?>(ix.Columns.Count);
             foreach (var ic in ix.Columns)
                 values.Add(row.TryGetValue(ic.Column.Name, out object? v) ? v : null);
 
-            _indexWriter.InsertIntoIndexAtRoot(ix.RootPageNumber, values, rowPointer);
+            _indexWriter.InsertIntoIndex(def, ix, values, rowPointer);
+
+            _indexWriter.IncrementIndexRowCount(def, ix);
         }
     }
 

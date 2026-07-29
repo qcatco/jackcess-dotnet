@@ -7,7 +7,7 @@
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <RootNamespace>JackcessDotNet</RootNamespace>
     <AssemblyName>JackcessDotNet</AssemblyName>
-    <Version>2.2.0</Version>
+    <Version>3.0.0</Version>
     <Description>Pure .NET 10 library for reading and writing Microsoft Access (.mdb) database files. Port of the Jackcess Java library.</Description>
     <Authors>Mehran Ghanizadeh</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
@@ -40,15 +40,15 @@
       history; this short blurb tells consumers what's new in *this* release.
     -->
     <PackageReleaseNotes>
-      2.2.0 — Files this library writes are now readable by Microsoft Access, which
-      previously they often were not. Text in a column without unicode compression
-      is no longer written compressed (ASCII came back as CJK-looking nonsense), and
-      a table created here is now visible and readable in Access: catalog rows are
-      parented to the Tables container with access-control entries, multi-column
-      index entries use Jet's per-column framing, column headers carry the running
-      variable-length index and the text sort order, and a table's usage maps live
-      on a data page. Also from 2.0.0: .NET 10 only (net8.0 dropped) and usage-map
-      growth so appending past ~2 MB works. See CHANGELOG.md.
+      3.0.0 — Appending to a table Access already indexed now keeps every one of its
+      indexes correct. Rows are threaded into all of a table's indexes rather than
+      only the primary key, each index's entry count is maintained (Access answers
+      COUNT(*) and MAX from an index, and a zero count made it fail them), and an
+      index leaf now splits correctly even in a tree Access wrote — previously the
+      new root was recorded against the wrong index, because Access does not order a
+      TDEF's index-data blocks to match its index slots. Reading complex columns
+      (multi-value, attachment, append-only memo) is new. Breaking: IndexWriter's
+      per-index methods take an Index rather than an ordinal. See CHANGELOG.md.
     </PackageReleaseNotes>
   </PropertyGroup>
 
