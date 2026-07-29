@@ -171,8 +171,9 @@ takes an entry, each index's entry count is kept current (Access answers `COUNT(
 wrote, which needs the new root recorded against the right index-data block rather than
 the right *slot*; the two are ordered independently. Pages Access prefix-compressed are
 expanded and re-emitted in full, and a full node splits under a new level, so trees grow
-past two levels — all three verified by querying the result through ACE.
-`Table.ForceIgnoreIndexCheck` is kept as public API but now has nothing left to suppress.
+past two levels — all three verified by querying the result through ACE. An insert is
+refused only when a key is too large for three to share a page, which is what splitting
+a node needs, and Jet's 255-byte key limit puts that out of reach.
 
 ⁵ `db.CreateIndex("People", "ByName", "Name")` — up to 10 ascending columns, spliced into
 the table's existing definition and then filled from the rows already stored, so it

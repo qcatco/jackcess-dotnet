@@ -72,9 +72,6 @@ files the ACE engine wrote and querying the results back through
   `MSysComplexColumns` maps the column to its flat table, and the returned rows are that
   table's, so the shape follows the kind of complex column.
 - **`Index.IndexDataNumber`** — which index-data block in the TDEF holds an index's tree.
-- **`Table.ForceIgnoreIndexCheck`** and **`ImportOptions.ForceIgnoreIndexCheck`** — opt out of
-  the index-maintenance refusal and keep inserting, leaving that index without the new entries.
-  Added mid-release, and by the end of it there is nothing left for it to suppress (see Changed).
 
 ### Changed
 
@@ -93,9 +90,11 @@ files the ACE engine wrote and querying the results back through
     new page, entry `m` becoming the separator the parent records. Insertion records the nodes it
     descends through and walks a split back up them, so any depth is handled.
 
-  `Table.ForceIgnoreIndexCheck` therefore no longer changes what happens to any index this library
-  can reach; it is kept as public API, and the only case left to refuse is a key too large to share
-  a page with another, which Jet's 255-byte key limit puts out of reach.
+  A `Table.ForceIgnoreIndexCheck` / `ImportOptions.ForceIgnoreIndexCheck` pair was added partway
+  through this release to opt out of the refusal, and is **gone again** — with all three cases
+  written there was nothing left for it to suppress. It was never in a published package, so no
+  caller can be relying on it. The only refusal left is a key too large for three to share a page,
+  which is what splitting a node needs; Jet's 255-byte key limit puts that out of reach.
 - **Breaking:** `IndexWriter.InsertIntoIndex`, `WouldExceedIndexCapacity` and
   `IncrementIndexRowCount` take an `Index` rather than an `int` ordinal, so a slot position
   can no longer be passed where a block number belongs. `IncrementIndexRowCountForDataBlock`

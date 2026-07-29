@@ -119,6 +119,31 @@ public sealed class NodeSplitTests : IDisposable
         Assert.Equal(Rows, total);
     }
 
+    /// <summary>
+    /// Well past a single node split — 1200 of these keys need the root to split more than once,
+    /// so this covers splits propagating repeatedly rather than the one-off the tests above see.
+    /// </summary>
+    [Fact]
+    public void ManyNodeSplits_InsertWithoutThrowingAndStayFindable()
+    {
+        const int Rows = 1200;
+
+        using (var db = CreateAndReopen())
+        {
+            var table = db.GetTable("T");
+            // No try/catch: none of these may throw. Before node splits were written, the insert
+            // at roughly row 50 threw NotSupportedException.
+            for (int i = 0; i < Rows; i++) table.Insert(RowFor(i));
+        }
+
+        using var reopened = Database.Open(_path);
+        var reread = reopened.GetTable("T");
+
+        Assert.Equal(Rows, reread.ReadAllRows().Count);
+        for (int i = 0; i < Rows; i++)
+            Assert.NotNull(reread.NewIndexCursor("PrimaryKey").FindRowByPrimaryKey(KeyFor(i)));
+    }
+
     private static List<int> ChildPages(byte[] node, PageFile pf)
     {
         var format  = JetFormat.Jet4;

@@ -125,7 +125,6 @@ public static class DatabaseImporter
                 throw new InvalidOperationException(
                     $"Table '{name}' already exists. Set ImportOptions.AppendIfExists = true to append rows to it.");
             var existing = db.GetTable(name);
-            existing.ForceIgnoreIndexCheck = options.ForceIgnoreIndexCheck;
             AppendDataTableRows(existing, table, options);
             return existing;
         }
@@ -158,8 +157,6 @@ public static class DatabaseImporter
                 $"DataTable '{table.TableName}' has no columns that map to a Jet type.");
 
         var t = db.CreateTable(name, columns, primaryKey: pk);
-
-        t.ForceIgnoreIndexCheck = options.ForceIgnoreIndexCheck;
 
         // Stream rows.
         foreach (DataRow dr in table.Rows)
@@ -226,7 +223,6 @@ public static class DatabaseImporter
                 throw new InvalidOperationException(
                     $"Table '{name}' already exists. Set ImportOptions.AppendIfExists = true to append rows to it.");
             var existing = db.GetTable(name);
-            existing.ForceIgnoreIndexCheck = options.ForceIgnoreIndexCheck;
             AppendCollectionRows(existing, items, options);
             return existing;
         }
@@ -240,8 +236,6 @@ public static class DatabaseImporter
         string? pk  = primaryKey ?? pkFromAttr;
 
         var t = db.CreateTable(name, columns, primaryKey: pk);
-
-        t.ForceIgnoreIndexCheck = options.ForceIgnoreIndexCheck;
 
         foreach (var item in items)
         {
@@ -466,11 +460,4 @@ public sealed class ImportOptions
     /// pre-existing behaviour.</para>
     /// </summary>
     public bool AppendIfExists { get; init; }
-
-    /// <summary>
-    /// Passed to <see cref="Table.ForceIgnoreIndexCheck"/> on the table being written.
-    /// Defaults to <c>false</c>, so an import that cannot keep an index correct fails instead
-    /// of leaving that index missing entries.
-    /// </summary>
-    public bool ForceIgnoreIndexCheck { get; init; }
 }

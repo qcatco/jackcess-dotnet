@@ -79,8 +79,8 @@ public sealed class Table
 
         _owningDb?.ValidateForeignKeysForInsert(this, row);
 
-        // Decide about the indexes *before* writing the row: if an index cannot be maintained
-        // and the caller has not opted out of the check, nothing should be written at all.
+        // Decide about the indexes *before* writing the row: if one cannot be kept correct,
+        // nothing should be written at all.
         var skipIndexes = PlanIndexMaintenance(row);
 
         int rowPtr = _dataWriter.InsertRow(_definition, row);
@@ -133,27 +133,10 @@ public sealed class Table
     }
 
     /// <summary>
-    /// When <c>false</c> (the default) an insert that cannot keep one of the table's indexes
-    /// correct throws, and neither the row nor the index is written. Set it to <c>true</c> to
-    /// insert anyway, leaving that index without an entry for the new row.
-    /// <para>
-    /// It has almost nothing left to affect: leaf splits, pages Access prefix-compressed, and full
-    /// nodes are all written correctly now, so the refusal it overrides no longer fires for any
-    /// index this library can reach — only for a key too large to share a page with any other,
-    /// which Jet's 255-byte key limit puts out of reach. It is kept because callers set it and
-    /// because a future unsupported case should have somewhere to opt out.
-    /// </para>
-    /// <para>
-    /// When it does suppress an entry, nothing is corrupted, but Access reads through indexes — it
-    /// will answer <c>COUNT(*)</c> from the primary key rather than scanning — so it can
-    /// under-report rows that are physically present.
-    /// </para>
-    /// </summary>
-    public bool ForceIgnoreIndexCheck { get; set; }
-
-    /// <summary>
-    /// Works out which indexes cannot take an entry for this row, and enforces
-    /// <see cref="ForceIgnoreIndexCheck"/>. Returns the ordinals to leave alone.
+    /// Works out which indexes have no entry to take for this row — one with no tree, or one that
+    /// ignores nulls when a key column is null — and returns their ordinals so
+    /// <see cref="AddIndexEntries"/> leaves them alone. An index that could not be kept correct at
+    /// all throws instead, before anything is written.
     /// </summary>
     private HashSet<int> PlanIndexMaintenance(Row row)
     {
@@ -172,18 +155,12 @@ public sealed class Table
 
             if (!writer.WouldExceedIndexCapacity(_definition, ix, values)) continue;
 
-            if (!ForceIgnoreIndexCheck)
-                throw new NotSupportedException(
-                    $"Index '{ix.Name}' on '{Name}' is full at two levels, and this row would " +
-                    "need its root node split to grow a third — that is not written yet. This row " +
-                    "was not written and no index was modified, so the file stays valid; rows " +
-                    "inserted earlier in the same batch remain. Set Table.ForceIgnoreIndexCheck (or " +
-                    $"ImportOptions.ForceIgnoreIndexCheck) to true to keep inserting and leave " +
-                    $"'{ix.Name}' without entries from this point on; Access may then under-report " +
-                    "rows for queries that use it. Leaf splits and pages Access prefix-compressed " +
-                    "need none of this — both are written correctly.");
-
-            skip.Add(i);
+            throw new NotSupportedException(
+                $"The key this row takes in index '{ix.Name}' on '{Name}' is too large for an " +
+                "index page to hold three of them, which is what splitting a node needs, so the " +
+                "index cannot grow to take it. This row was not written and no index was modified, " +
+                "so the file stays valid; rows inserted earlier in the same batch remain. Index " +
+                "fewer or shorter columns.");
         }
 
         return skip;
