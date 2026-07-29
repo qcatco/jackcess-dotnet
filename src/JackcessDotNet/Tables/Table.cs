@@ -252,14 +252,95 @@ public sealed class Table
     /// </summary>
     public void UpdateByPrimaryKey(object primaryKeyValue, Row newValues)
     {
-        int newRowPtr = _dataWriter.UpdateRowByPrimaryKey(_definition, primaryKeyValue, newValues);
+        string? pkColumn = _definition.PrimaryKeyColumnName;
 
-        // The merged row that was actually written carries the (unchanged) PK value, so we can
-        // index it under primaryKeyValue without inspecting newValues for the PK column.
-        if (_definition.PrimaryKeyColumnName is not null && _definition.PrimaryKeyIndexPage > 0)
-            new IndexWriter(_file, _allocator)
-                .InsertPrimaryKey(_definition, primaryKeyValue, newRowPtr);
+        // The row as it stands, so its old index entries can be taken out: an update rewrites the
+        // row at a new pointer and may change an indexed value, which leaves every index holding a
+        // key that is either at the wrong place or simply wrong.
+        var before = pkColumn is not null ? FindRowWithPointer(pkColumn, primaryKeyValue) : null;
+
+        _dataWriter.UpdateRowByPrimaryKey(_definition, primaryKeyValue, newValues);
+
+        if (before is not null) RemoveIndexEntries(before.Value.Row, before.Value.RowPointer);
+
+        // Re-read rather than merge by hand: the row that was written is the old one overlaid with
+        // newValues, and the indexes have to describe exactly that.
+        var after = pkColumn is not null ? FindRowWithPointer(pkColumn, primaryKeyValue) : null;
+        if (after is not null) AddIndexEntries(after.Value.Row, after.Value.RowPointer, new HashSet<int>());
     }
+
+    /// <summary>
+    /// The first row whose <paramref name="columnName"/> equals <paramref name="value"/>, with its
+    /// row pointer — the same order <see cref="DataPageWriter"/> scans in, so both agree on which
+    /// row "first" is.
+    /// </summary>
+    private (Row Row, int RowPointer)? FindRowWithPointer(string columnName, object value)
+    {
+        foreach (var (row, rowPtr) in EnumerateRowsWithPointers())
+            if (row.TryGetValue(columnName, out object? stored) && Equals(stored, value))
+                return (row, rowPtr);
+        return null;
+    }
+
+    /// <summary>
+    /// Takes a row out of every index that holds it, and decrements each one's entry count.
+    /// <para>
+    /// Access answers <c>COUNT(*)</c> from an index and follows its entries without checking that
+    /// the row still matches, so an entry left behind for a removed row both over-reports and
+    /// points at a slot that no longer holds what it claims. This library's own
+    /// <see cref="IndexCursor"/> filters those, which is why the omission stayed invisible to it.
+    /// </para>
+    /// </summary>
+    private void RemoveIndexEntries(Row row, int rowPtr)
+    {
+        var writer     = new IndexWriter(_file, _allocator);
+        var maintained = new HashSet<int>();
+
+        foreach (var ix in IndexesForMaintenance())
+        {
+            if (ix.RootPageNumber <= 0 || ix.Columns.Count == 0) continue;
+            if (!maintained.Add(ix.IndexDataNumber)) continue;
+
+            var values = IndexValuesFor(ix, row, out bool anyNull);
+            if (anyNull && ix.IgnoresNulls) continue;
+
+            if (writer.RemoveFromIndex(_definition, ix, values, rowPtr))
+                writer.IncrementIndexRowCount(_definition, ix, -1);
+        }
+    }
+
+    /// <summary>
+    /// The indexes to keep in step. A table read back from disk lists them; one created in this
+    /// session has no index metadata yet, only the primary-key tree it just wrote, so that is
+    /// described here rather than left unmaintained.
+    /// </summary>
+    private IEnumerable<Index> IndexesForMaintenance()
+    {
+        if (_definition.Indexes.Count > 0) return _definition.Indexes;
+
+        var pkCols = _definition.EffectivePrimaryKeyColumns;
+        if (pkCols.Count == 0 || _definition.PrimaryKeyIndexPage <= 0) return Array.Empty<Index>();
+
+        var columns = new List<IndexColumn>(pkCols.Count);
+        foreach (string name in pkCols)
+        {
+            var col = _definition.Columns.FirstOrDefault(
+                c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (col is null) return Array.Empty<Index>();
+            columns.Add(new IndexColumn(col, AscendingIndexColumnFlag));
+        }
+
+        return new[]
+        {
+            new Index("PrimaryKey", columns, _definition.PrimaryKeyIndexPage,
+                      indexNumber: 0, flags: PrimaryKeyIndexFlags, indexType: PrimaryKeyIndexType,
+                      indexDataNumber: PrimaryKeyDataBlock),
+        };
+    }
+
+    private const byte AscendingIndexColumnFlag = 0x01;
+    private const byte PrimaryKeyIndexFlags     = 0x89;   // unknown | unique | required
+    private const byte PrimaryKeyIndexType      = 0x01;
 
     private void MaybeAddPrimaryKeyIndexEntry(Row row, int rowPtr)
     {
@@ -306,8 +387,13 @@ public sealed class Table
     /// </summary>
     public void DeleteRow(string columnName, object value)
     {
+        // Read the row before it goes, since its values are what the index entries were built from.
+        var doomed = FindRowWithPointer(columnName, value);
+
         _dataWriter.DeleteRow(_definition, columnName, value);
         _dataWriter.IncrementTdefRowCount(_definition.TdefPageNumber, -1);
+
+        if (doomed is not null) RemoveIndexEntries(doomed.Value.Row, doomed.Value.RowPointer);
     }
 
     /// <summary>

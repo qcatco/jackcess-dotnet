@@ -36,6 +36,23 @@ files the ACE engine wrote and querying the results back through
 - **Rows were threaded only into the primary-key index.** Appending 500 rows to an
   Access-authored table left Access reporting one row — its own — for anything that used
   another index.
+- **Deleting a row touched no index at all, and updating one added a second entry rather than
+  moving the first.** `DeleteRow` left an entry pointing at a slot that no longer holds what it
+  claims and never decremented the index's entry count, so Access — which answers `COUNT(*)` from
+  an index and follows its entries without rechecking the row — over-reported and could return a
+  deleted row. `UpdateByPrimaryKey` inserted a fresh primary-key entry beside the stale one and
+  ignored secondary indexes entirely, so a changed indexed value stayed indexed under its old key.
+  Both now take the row's old entries out of every index and put the new ones in, counts included.
+  Removing an entry also refreshes the ancestor keys it invalidates: a node entry holds the
+  greatest key in its child's subtree, so dropping a leaf's greatest entry left the parent claiming
+  a range the leaf no longer covered, and a search inside that gap descended into the wrong leaf
+  and found nothing. Pages are not merged when they empty — an empty leaf keeps its place, which
+  hides nothing, since every key at or below its stale parent key either lived there and is gone or
+  lives further left.
+
+  This was invisible to the library's own tests because `IndexCursor` filters entries whose row no
+  longer matches, so every seek-based assertion passed against a file Access would read wrongly.
+  The tests now assert leaf entry counts and the stored entry count off the page.
 
 ### Added
 

@@ -143,6 +143,7 @@ materialising the whole table.
 | **Files and tables Microsoft Access can open**    | ✅ Both paths verified against the ACE engine³ |
 | Appending into large existing files               | ✅ Inline usage-map window slides, then promotes to a reference map² |
 | Maintaining *every* index of a table on insert    | ✅ Including leaf splits in trees Access wrote⁴ |
+| Keeping indexes correct on delete / update         | ✅ Entries moved or removed, counts adjusted |
 | Creating secondary indexes                        | ✅ `Database.CreateIndex`, single or composite, backfilled⁵ |
 | Reading complex columns (multi-value, attachment, memo history) | ✅ `Table.GetComplexValues` |
 | Memo / OLE long values                            | ✅      |

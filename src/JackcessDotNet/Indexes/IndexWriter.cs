@@ -229,6 +229,88 @@ public sealed class IndexWriter
         _file.WritePage(table.TdefPageNumber, page);
     }
 
+    /// <summary>
+    /// Removes the entry for (<paramref name="values"/>, <paramref name="rowPointer"/>) from an
+    /// index, and refreshes the ancestor keys the removal invalidates.
+    /// <para>
+    /// A node entry carries the greatest key in its child's subtree, so dropping a leaf's greatest
+    /// entry leaves the parent claiming a range the leaf no longer covers. A search inside that gap
+    /// then descends into this leaf and finds nothing, even though the key lives in the next one —
+    /// so every node on the path back up has its entry re-derived from the child it points at.
+    /// </para>
+    /// <para>
+    /// Pages are not merged when they empty out; an empty leaf keeps its place in the chain. Access
+    /// tolerates that (it leaves empty pages behind too) and merging would need the sibling
+    /// redistribution this writer has no other use for.
+    /// </para>
+    /// </summary>
+    /// <returns>True when an entry was found and removed.</returns>
+    public bool RemoveFromIndex(TableDefinition table, Index index,
+                               IReadOnlyList<object?> values, int rowPointer)
+    {
+        if (table is null) throw new ArgumentNullException(nameof(table));
+        if (index is null) throw new ArgumentNullException(nameof(index));
+        if (values is null || values.Count == 0) return false;
+        if (index.RootPageNumber <= 0) return false;
+
+        var    format   = _file.Format;
+        byte[] keyBytes = EncodeEntryKey(values);
+
+        var (nodes, leafPage) = DescendPath(index.RootPageNumber, keyBytes);
+
+        byte[] leaf    = _file.ReadPage(leafPage);
+        var    entries = ReadEntries(leaf, format, isLeaf: true);
+
+        // Match on the row pointer as well as the key: a non-unique index holds several entries
+        // under one key, and only the one for this row may go.
+        int at = entries.FindIndex(
+            e => e.RowPtr == rowPointer && CompareBytes(e.KeyBytes, keyBytes) == 0);
+        if (at < 0) return false;
+
+        entries.RemoveAt(at);
+        WriteEntries(leafPage, entries, format, isLeaf: true);
+
+        RefreshAncestorKeys(nodes, leafPage);
+        return true;
+    }
+
+    /// <summary>
+    /// Walks a recorded descent path from the bottom up, re-deriving each node's entry for the
+    /// child below it. Stops as soon as a key is already correct, since nothing above it can have
+    /// changed either.
+    /// </summary>
+    private void RefreshAncestorKeys(List<int> nodes, int changedChild)
+    {
+        var format = _file.Format;
+        int child  = changedChild;
+
+        for (int level = nodes.Count - 1; level >= 0; level--)
+        {
+            int    nodePage = nodes[level];
+            byte[] page     = _file.ReadPage(nodePage);
+            var    entries  = ReadEntries(page, format, isLeaf: false);
+
+            int at = entries.FindIndex(e => e.SubPage == child);
+            // The child is this node's tail, which carries no key — so there is nothing to refresh
+            // here, and nothing above can be stale either: the tail's subtree holds the node's own
+            // greatest key only if the node is itself some ancestor's tail, and so on up.
+            if (at < 0) return;
+
+            // An emptied child has no greatest key to copy up. Leaving the old one is safe: it was
+            // this child's former maximum, so every key at or below it either lived here and is
+            // gone, or lives further left — nothing that still exists gets hidden.
+            if (IsEmpty(child)) return;
+
+            var (key, rowPtr) = GreatestKeyIn(child);
+            if (CompareBytes(entries[at].KeyBytes, key) == 0 && entries[at].RowPtr == rowPtr) return;
+
+            entries[at] = BuildNodeEntry(key, rowPtr, child);
+            WriteEntries(nodePage, entries, format, isLeaf: false);
+
+            child = nodePage;
+        }
+    }
+
     /// <summary>Encodes an index entry's key: one value uses the single-column form.</summary>
     private static byte[] EncodeEntryKey(IReadOnlyList<object?> values)
         => values.Count == 1 && values[0] is not null
@@ -504,6 +586,20 @@ public sealed class IndexWriter
 
         var (rootKey, rootRowPtr) = GreatestKeyIn(child);
         return CreateRootNode(child, rootKey, rootRowPtr, sibling);
+    }
+
+    /// <summary>Whether an index page holds no entries and no child tail.</summary>
+    private bool IsEmpty(int page)
+    {
+        var    format = _file.Format;
+        byte[] p      = _file.ReadPage(page);
+        bool   isLeaf = p[0] == JetFormat.PageTypeIndexLeaf;
+
+        if (ReadEntries(p, format, isLeaf).Count > 0) return false;
+        if (isLeaf) return true;
+
+        int tail = ByteUtil.GetInt(p, format.OffsetChildTailIndexPage);
+        return tail <= 0 || tail == NoPage;
     }
 
     /// <summary>
