@@ -72,6 +72,13 @@ internal static class TdefReader
             byte  flags       = page[p + format.OffsetColumnFlags];
             bool  isAutoNum   = (flags & 0x04) != 0;
             bool  isAutoGuid  = (flags & 0x40) != 0;
+            // The ext-flags byte sits immediately after the flags byte and carries the
+            // compressed-unicode bit (Jackcess Java's COMPRESSED_UNICODE_EXT_FLAG_MASK).
+            // Jet3 has no compressed form at all — its text is stored in the DB charset.
+            byte  extFlags    = format.Version == JetVersion.Jet3
+                                    ? (byte)0
+                                    : page[p + format.OffsetColumnFlags + 1];
+            bool  isCompUni   = (extFlags & 0x01) != 0;
             short length      = ByteUtil.GetShort(page, p + format.OffsetColumnLength);
             short fixedOffset = ByteUtil.GetShort(page, p + format.OffsetColumnFixedDataOffset);
             short varIndex    = ByteUtil.GetShort(page, p + format.OffsetColumnVarTableIndex);
@@ -85,7 +92,8 @@ internal static class TdefReader
                 isAutoNumber:   isAutoNum || isAutoGuid,
                 allowZeroLength:false,
                 precision:      page[p + format.OffsetColumnPrecision],
-                scale:          page[p + format.OffsetColumnScale]);
+                scale:          page[p + format.OffsetColumnScale],
+                isCompressedUnicode: isCompUni);
 
             col.ColumnNumber = colNum;
             // Honour the on-disk offsets so post-deletion tables decode correctly.
@@ -277,7 +285,9 @@ internal static class TdefReader
         return (name, format.SizeNameLength + nameLen);
     }
 
-    // Column is a sealed class with internal ctor, so we rebuild it with the real name.
+    // Column is a sealed class with an internal ctor, so we rebuild it with the real name.
+    // Every field read off the TDEF has to be carried across here — anything forgotten is
+    // silently lost, since the parse above succeeded and only the copy dropped it.
     private static Column RenameColumn(Column src, string name) =>
         new Column(
             name:           name,
@@ -287,7 +297,8 @@ internal static class TdefReader
             isAutoNumber:   src.IsAutoNumber,
             allowZeroLength:src.AllowZeroLength,
             precision:      src.Precision,
-            scale:          src.Scale)
+            scale:          src.Scale,
+            isCompressedUnicode: src.IsCompressedUnicode)
         {
             ColumnNumber     = src.ColumnNumber,
             FixedDataOffset  = src.FixedDataOffset,

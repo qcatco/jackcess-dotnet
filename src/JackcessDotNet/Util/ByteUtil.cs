@@ -101,19 +101,21 @@ internal static class ByteUtil
     // ── String helpers ────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Encodes a string as compressed or uncompressed UTF-16LE for Jet Text columns.
-    /// Jet uses a simple compression: if all code points fit in the Latin-1 range (0x00-0xFF)
-    /// and the first byte is 0xFF (compression marker), then single bytes are used.
-    /// We always write uncompressed UTF-16LE prefixed with the 0xFF 0xFE BOM marker approach,
-    /// but Jet Text fields use the 0xFF marker for compressed mode.
+    /// Encodes a string for a Jet4+ Text/Memo column: either plain UTF-16LE, or Jet's
+    /// "compressed" form — the 2-byte header 0xFF 0xFE followed by one byte per char.
+    /// <para>
+    /// <paramref name="allowCompression"/> must come from the target column's
+    /// compressed-unicode flag (ext-flags bit 0x01), never from the value alone. Access
+    /// only looks for the header on a column that carries that flag; write compressed
+    /// bytes into a column without it and Access reads the value as UTF-16, pairing the
+    /// bytes into nonsense — "ASKARISHAHI" surfaces as "十䅋䥒䡓䡁" because 0x41 0x53 ("AS")
+    /// reads as U+5341. It defaults to <c>false</c> so a caller that doesn't know the flag
+    /// cannot silently corrupt a value; uncompressed is always readable.
+    /// </para>
     /// </summary>
-    public static byte[] EncodeText(string value)
+    public static byte[] EncodeText(string value, bool allowCompression = false)
     {
-        // Try compressed encoding when all chars fit in Latin-1.
-        // Access uses a 2-byte marker (0xFF 0xFE) so the decoder can distinguish
-        // compressed text from uncompressed UTF-16LE.
-        bool canCompress = value.All(c => c <= 0xFF);
-        if (canCompress)
+        if (allowCompression && IsUnicodeCompressible(value))
         {
             var bytes = new byte[value.Length + 2];
             bytes[0] = 0xFF;
@@ -124,6 +126,15 @@ internal static class ByteUtil
         }
         return Encoding.Unicode.GetBytes(value);
     }
+
+    /// <summary>
+    /// Whether Jet's compressed form can represent this string, matching Jackcess Java's
+    /// <c>ColumnImpl.isUnicodeCompressible</c>: more than 2 chars (at 2 or fewer the
+    /// header cancels out the saving) and every char in 1..0xFF — a NUL is excluded
+    /// because Jet's compressed form uses a 0x00 byte to switch encoding modes.
+    /// </summary>
+    private static bool IsUnicodeCompressible(string value)
+        => value.Length > 2 && value.All(c => c is >= (char)1 and <= (char)0xFF);
 
     /// <summary>
     /// Jet4 text decoder. Real Access prefixes compressed text with the 2-byte

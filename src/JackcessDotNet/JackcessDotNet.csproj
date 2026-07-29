@@ -1,14 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <RootNamespace>JackcessDotNet</RootNamespace>
     <AssemblyName>JackcessDotNet</AssemblyName>
-    <Version>1.2.2</Version>
-    <Description>Pure .NET 8 library for reading and writing Microsoft Access (.mdb) database files. Port of the Jackcess Java library.</Description>
+    <Version>2.2.0</Version>
+    <Description>Pure .NET 10 library for reading and writing Microsoft Access (.mdb) database files. Port of the Jackcess Java library.</Description>
     <Authors>Mehran Ghanizadeh</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
     <Optimize>true</Optimize>
@@ -27,7 +27,10 @@
     <RepositoryUrl>https://github.com/mehran-ghanizadeh/jackcess-dotnet.git</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
 
-    <!-- SourceLink: lets consumers step into this library's source on GitHub from their debugger -->
+    <!-- SourceLink: lets consumers step into this library's source on GitHub from their
+         debugger. The SDK has provided this since .NET 8, so there is no
+         Microsoft.SourceLink.GitHub package reference any more — these properties are
+         what it still needs. -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
@@ -37,10 +40,15 @@
       history; this short blurb tells consumers what's new in *this* release.
     -->
     <PackageReleaseNotes>
-      1.2.2 — Adds a package icon (jackcess.png). Same metadata + SourceLink
-      improvements introduced in 1.2.1 (PackageProjectUrl, RepositoryUrl,
-      Microsoft.SourceLink.GitHub, README badges). No library code changes
-      vs. 1.2.0; see CHANGELOG.md.
+      2.2.0 — Files this library writes are now readable by Microsoft Access, which
+      previously they often were not. Text in a column without unicode compression
+      is no longer written compressed (ASCII came back as CJK-looking nonsense), and
+      a table created here is now visible and readable in Access: catalog rows are
+      parented to the Tables container with access-control entries, multi-column
+      index entries use Jet's per-column framing, column headers carry the running
+      variable-length index and the text sort order, and a table's usage maps live
+      on a data page. Also from 2.0.0: .NET 10 only (net8.0 dropped) and usage-map
+      growth so appending past ~2 MB works. See CHANGELOG.md.
     </PackageReleaseNotes>
   </PropertyGroup>
 
@@ -51,10 +59,12 @@
     <None Include="..\..\jackcess.png"  Pack="true" PackagePath="\" />
   </ItemGroup>
 
-  <ItemGroup>
-    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
-  </ItemGroup>
+  <!--
+    No PackageReference items: System.Text.Encoding.CodePages (for the legacy Windows
+    code pages Jet stores text in) and SourceLink are both part of the .NET 10 SDK and
+    shared framework, so referencing them explicitly earns NU1510. This library has no
+    third-party dependencies.
+  -->
 
   <ItemGroup>
     <InternalsVisibleTo Include="JackcessDotNet.Tests" />

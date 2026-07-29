@@ -10,6 +10,7 @@ public sealed class ColumnBuilder
     private int _length = -1;        // -1 = use default
     private bool _isRequired;
     private bool _isAutoNumber;
+    private bool _isCompressedUnicode;
     private bool _allowZeroLength = true;
     private byte _precision = 18;    // default Numeric precision
     private byte _scale = 0;         // default Numeric scale
@@ -73,6 +74,18 @@ public sealed class ColumnBuilder
     /// <summary>Instance alias for <see cref="WithAutoNumber"/>.</summary>
     public ColumnBuilder AutoNumber(bool autoNumber = true) => WithAutoNumber(autoNumber);
 
+    /// <summary>
+    /// Stores this Text/Memo column's values in Jet's compressed form — one byte per char
+    /// for Latin-1-only strings, behind a 0xFF 0xFE header — and declares it in the TDEF so
+    /// Access decodes them. Off by default: uncompressed UTF-16 costs space but is readable
+    /// no matter what, whereas a compressed value in an undeclared column is unreadable.
+    /// </summary>
+    public ColumnBuilder CompressedUnicode(bool compressed = true)
+    {
+        _isCompressedUnicode = compressed;
+        return this;
+    }
+
     public Column ToColumn()
     {
         ValidateName(_name);
@@ -97,7 +110,8 @@ public sealed class ColumnBuilder
             isAutoNumber: _isAutoNumber,
             allowZeroLength: _allowZeroLength,
             precision: _precision,
-            scale: _scale);
+            scale: _scale,
+            isCompressedUnicode: _isCompressedUnicode);
     }
 
     private static void ValidateName(string name)

@@ -111,11 +111,20 @@ internal sealed class LvalWriter
 
         if (lvalPage < 0)
         {
-            // No page has room — allocate a fresh LVAL data page.
+            // No page has room — allocate a fresh LVAL data page. Ask the usage-map
+            // first: allocating extends the file straight away, so a map that cannot
+            // record the page must not cost one.
             // tdefPageNumber = 0: LVAL pages are not owned by a user TDEF.
-            lvalPage = _allocator.AllocateDataPage(0);
-            umapPage = _file.ReadPage(_umapPageNumber);   // re-read after alloc
-            UsageMap.AddPage(umapPage, 0 /* OwnedPagesRow */, lvalPage, _format);
+            lvalPage = _allocator.NextPageNumber;
+            if (!UsageMap.CanAddPage(umapPage, 0 /* OwnedPagesRow */, lvalPage, _format, out string? refusal))
+                throw new NotSupportedException(refusal);
+
+            int allocated = _allocator.AllocateDataPage(0);
+            if (allocated != lvalPage)
+                throw new InvalidOperationException(
+                    $"Allocated LVAL page {allocated} but the usage-map was checked for page {lvalPage}.");
+
+            UsageMap.AddPage(umapPage, 0 /* OwnedPagesRow */, allocated, _format, _allocator, _file);
             _file.WritePage(_umapPageNumber, umapPage);
         }
 

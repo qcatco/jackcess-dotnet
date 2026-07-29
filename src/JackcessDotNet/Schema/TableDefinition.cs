@@ -13,6 +13,8 @@ public sealed class TableDefinition
 
     private const byte    ColumnFlagFixedLen      = 0x01;
     private const byte    ColumnFlagUpdatable     = 0x02;
+    /// <summary>General-legacy text sort order (LCID 1033) — what Access stamps on columns.</summary>
+    private const short   GeneralLegacySortOrder  = 1033;
     private const byte    ColumnFlagAutoNumber    = 0x04;
     private const byte    ColumnFlagAutoNumberGuid= 0x40;
 
@@ -148,6 +150,11 @@ public sealed class TableDefinition
         // The page buffer is always a full page; content starts at byte 0.
         var page = new byte[format.PageSize];
 
+        // Bytes 2-3 hold the page's remaining free space. Access accounts for it as
+        // PageSize - 8 - definitionLength (an Access-written 1002-byte definition in a
+        // 4096-byte page records 3086), so mirror that rather than leaving it zero.
+        ByteUtil.PutShort(page, 2, (short)(format.PageSize - 8 - contentSize));
+
         // ── 8-byte page prefix ────────────────────────────────────────────────
         page[0] = JetFormat.PageTypeTableDef;
         page[1] = 0x01;
@@ -218,24 +225,35 @@ public sealed class TableDefinition
         }
 
         // ── Column definitions (25 bytes each) ───────────────────────────────
+        // The variable-length-table index field carries the *running* counter for every
+        // column, not just the variable-length ones: a fixed column stores the index the
+        // next variable column will take. Access writes it that way, and writing 0 on
+        // fixed columns leaves it unable to read the table's rows at all (it reports
+        // "Not a valid bookmark") even though the row bytes themselves are fine.
+        short varCounter = 0;
+
         foreach (var col in Columns)
         {
             page[pos++] = (byte)col.DataType;
             ByteUtil.PutInt  (page, pos, MagicTableNumber); pos += 4;
             ByteUtil.PutShort(page, pos, (short)col.ColumnNumber); pos += 2;
-            ByteUtil.PutShort(page, pos, col.DataType.IsVariableLength() ? varIndexes[col] : (short)0); pos += 2;
+            ByteUtil.PutShort(page, pos, varCounter); pos += 2;
+            if (col.DataType.IsVariableLength()) varCounter++;
             ByteUtil.PutShort(page, pos, (short)col.ColumnNumber); pos += 2;
 
-            if (col.DataType == DataType.Text)
+            // These two bytes are precision+scale for Numeric and the text sort order for
+            // everything else — Access stamps the general-legacy LCID on every other type,
+            // including fixed numeric ones like Long and Money.
+            if (col.DataType == DataType.Numeric)
             {
-                for (int i = 0; i < format.SizeSortOrder; i++) page[pos++] = 0x00;
+                page[pos++] = col.Precision;
+                page[pos++] = col.Scale;
             }
             else
             {
-                page[pos++] = col.DataType == DataType.Numeric ? col.Precision : (byte)0x00;
-                page[pos++] = col.DataType == DataType.Numeric ? col.Scale     : (byte)0x00;
-                ByteUtil.PutShort(page, pos, 0); pos += 2;
+                ByteUtil.PutShort(page, pos, GeneralLegacySortOrder); pos += 2;
             }
+            for (int i = 2; i < format.SizeSortOrder; i++) page[pos++] = 0x00;
 
             byte flags = ColumnFlagUpdatable;
             if (!col.DataType.IsVariableLength()) flags |= ColumnFlagFixedLen;
@@ -243,7 +261,9 @@ public sealed class TableDefinition
                 flags |= (col.DataType == DataType.Guid ? ColumnFlagAutoNumberGuid : ColumnFlagAutoNumber);
 
             page[pos++] = flags;
-            page[pos++] = 0x00;   // ext flags
+            // ext flags: bit 0x01 declares the column's text as compressed-unicode, which
+            // is what lets Access recognise the 0xFF 0xFE header the encoder writes.
+            page[pos++] = col.IsCompressedUnicode ? (byte)0x01 : (byte)0x00;
             ByteUtil.PutInt  (page, pos, 0); pos += 4;
             ByteUtil.PutShort(page, pos, col.DataType.IsVariableLength() ? (short)0 : fixedOffsets[col]); pos += 2;
             ByteUtil.PutShort(page, pos, col.DataType.IsLongValue()      ? (short)0 : (short)col.Length); pos += 2;

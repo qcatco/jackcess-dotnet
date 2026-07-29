@@ -15,15 +15,9 @@ public sealed class IndexReaderTests
     private readonly ITestOutputHelper _output;
     public IndexReaderTests(ITestOutputHelper output) => _output = output;
 
-    private static string? CorpusRoot()
-    {
-        const string root = @"D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data";
-        return Directory.Exists(root) ? root : null;
-    }
-
     public static IEnumerable<object[]> CorpusFiles()
     {
-        string? root = CorpusRoot();
+        string? root = CorpusPath.Resolve();
         if (root is null) yield break;
         foreach (var ver in new[] { "V2000", "V2003" })
         {

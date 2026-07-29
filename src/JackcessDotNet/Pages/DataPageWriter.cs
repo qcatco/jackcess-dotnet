@@ -102,13 +102,23 @@ public sealed class DataPageWriter
                 return pageNum;
         }
 
-        // Allocate a fresh data page and register it in the usage-map.
-        int newPage = _allocator.AllocateDataPage(tableDef.TdefPageNumber);
-        umapPage = _file.ReadPage(tableDef.UmapPageNumber);  // re-read (may have been evicted)
-        UsageMap.AddPage(umapPage, tableDef.OwnedPagesRow, newPage, format);
+        // Ask the usage-map before allocating: allocating extends the file straight away,
+        // so a map that cannot record the page must not cost one. (Recording it first
+        // isn't an option — a map that promotes itself allocates bitmap pages, which
+        // would take the very number the data page is about to get.)
+        int newPage = _allocator.NextPageNumber;
+        if (!UsageMap.CanAddPage(umapPage, tableDef.OwnedPagesRow, newPage, format, out string? refusal))
+            throw new NotSupportedException(refusal);
+
+        int allocated = _allocator.AllocateDataPage(tableDef.TdefPageNumber);
+        if (allocated != newPage)
+            throw new InvalidOperationException(
+                $"Allocated data page {allocated} but the usage-map was checked for page {newPage}.");
+
+        UsageMap.AddPage(umapPage, tableDef.OwnedPagesRow, allocated, format, _allocator, _file);
         _file.WritePage(tableDef.UmapPageNumber, umapPage);
 
-        return newPage;
+        return allocated;
     }
 
     private int WriteRowOnPage(int pageNumber, byte[] rowData, int tdefPageNumber, JetFormat format)

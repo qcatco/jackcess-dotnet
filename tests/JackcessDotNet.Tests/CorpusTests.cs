@@ -9,12 +9,8 @@ namespace JackcessDotNet.Tests;
 /// Reality-check tests that open .mdb files from the Jackcess Java test corpus
 /// (V1997 / V2000 / V2003 — V2007+ .accdb files are skipped: codec not yet implemented).
 ///
-/// Corpus root is resolved in this order:
-///   1. env var JACKCESS_CORPUS_PATH
-///   2. ../../jackcess-jackcess-5.0.0/src/test/resources/data (relative to repo root)
-///   3. D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data
-///
-/// If no corpus is found, MemberData returns empty and the theory simply runs zero cases.
+/// Corpus root comes from <see cref="CorpusPath.Resolve"/>. If no corpus is found,
+/// MemberData returns empty and the theory simply runs zero cases.
 /// Each file is its own theory invocation so the failure list maps 1:1 to broken files.
 /// </summary>
 public sealed class CorpusTests
@@ -25,7 +21,7 @@ public sealed class CorpusTests
 
     public static IEnumerable<object[]> CorpusFiles()
     {
-        string? root = ResolveCorpusRoot();
+        string? root = CorpusPath.Resolve();
         if (root is null) yield break;
 
         foreach (var version in new[] { "V1997", "V2000", "V2003" })
@@ -45,25 +41,6 @@ public sealed class CorpusTests
             foreach (string file in Directory.EnumerateFiles(dir, "*.accdb"))
                 yield return new object[] { version, Path.GetFileName(file), file };
         }
-    }
-
-    private static string? ResolveCorpusRoot()
-    {
-        string? env = Environment.GetEnvironmentVariable("JACKCESS_CORPUS_PATH");
-        if (!string.IsNullOrWhiteSpace(env) && Directory.Exists(env)) return env;
-
-        // Repo-relative fallback (lets the test work on machines other than the author's).
-        string here = AppContext.BaseDirectory;
-        for (int up = 0; up < 8; up++)
-        {
-            string candidate = Path.GetFullPath(Path.Combine(here, "..",
-                "jackcess-jackcess-5.0.0", "src", "test", "resources", "data"));
-            if (Directory.Exists(candidate)) return candidate;
-            here = Path.GetFullPath(Path.Combine(here, ".."));
-        }
-
-        const string hardcoded = @"D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data";
-        return Directory.Exists(hardcoded) ? hardcoded : null;
     }
 
     [Theory]

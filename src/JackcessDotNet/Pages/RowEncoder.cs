@@ -246,7 +246,8 @@ public sealed class RowEncoder
             case DataType.Text:
                 if (_format.Version == JetVersion.Jet3)
                     return _format.TextEncoding.GetBytes(Convert.ToString(value) ?? string.Empty);
-                return Util.ByteUtil.EncodeText(Convert.ToString(value) ?? string.Empty);
+                return Util.ByteUtil.EncodeText(Convert.ToString(value) ?? string.Empty,
+                                                col.IsCompressedUnicode);
             case DataType.Binary:
                 return (byte[])value;
             case DataType.Memo:
@@ -254,7 +255,7 @@ public sealed class RowEncoder
                 string text = Convert.ToString(value) ?? string.Empty;
                 byte[] textBytes = _format.Version == JetVersion.Jet3
                     ? _format.TextEncoding.GetBytes(text)
-                    : Util.ByteUtil.EncodeText(text);
+                    : Util.ByteUtil.EncodeText(text, col.IsCompressedUnicode);
                 if (textBytes.Length > 0
                     && _lvalWriters is not null
                     && _lvalWriters.TryGetValue(col.Name, out var memoWriter))

@@ -51,6 +51,18 @@ public sealed class Column
     /// <summary>0-based index into the variable-length offset table; -1 for fixed columns.</summary>
     public short VarLenTableIndex { get; internal set; } = -1;
 
+    /// <summary>
+    /// Whether this Text/Memo column stores values in Jet's compressed form — bit 0x01 of
+    /// the column's ext-flags byte in the TDEF.
+    /// <para>
+    /// A value may only be written compressed when this is set: Access looks for the
+    /// 0xFF 0xFE header only on a flagged column, and reads the value as UTF-16 otherwise,
+    /// which turns Latin-1 text into byte-paired nonsense. Read from the file for existing
+    /// tables, so appending honours whatever the file already declares.
+    /// </para>
+    /// </summary>
+    public bool IsCompressedUnicode { get; internal set; }
+
     internal Column(
         string name,
         DataType dataType,
@@ -59,8 +71,10 @@ public sealed class Column
         bool isAutoNumber,
         bool allowZeroLength,
         byte precision,
-        byte scale)
+        byte scale,
+        bool isCompressedUnicode = false)
     {
+        IsCompressedUnicode = isCompressedUnicode;
         Name = name;
         DataType = dataType;
         Length = length;

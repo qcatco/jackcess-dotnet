@@ -31,6 +31,7 @@ public sealed class IndexWriter
 {
     private const int  NoPage         = unchecked((int)0xFFFFFFFF);
     private const byte AscStartFlag   = 0x7F;
+    private const byte AscNullFlag    = 0x00;
     private const int  LeafTrailerLen = 4;   // 3-byte BE page + 1-byte row
     private const int  NodeTrailerLen = 8;   // leaf trailer + 4-byte BE sub-page
 
@@ -141,6 +142,55 @@ public sealed class IndexWriter
     /// </summary>
     public void InsertPrimaryKey(TableDefinition table, IReadOnlyList<object?> values, int rowPointer)
         => InsertPrimaryKeyBytes(table, EncodeCompositeKeyBytes(values), rowPointer);
+
+    /// <summary>
+    /// Inserts (key → rowPointer) into the B-tree rooted at <paramref name="rootPage"/>,
+    /// for an index other than the table's primary key.
+    /// <para>
+    /// Needed to keep a system table's indexes in step when a row is appended to it: Access
+    /// enumerates database objects through MSysObjects' <c>ParentIdName</c> index, so a row
+    /// that is on the data page but absent from that index is invisible to Access even
+    /// though this library's own full page scan still finds it.
+    /// </para>
+    /// <para>
+    /// A root-leaf split is refused rather than performed: promoting a new root means
+    /// patching this index's root-page field in the TDEF, and <see cref="PatchTdefRoot"/>
+    /// only knows how to patch the first index block. Failing loudly costs one table;
+    /// a half-updated catalog index would cost Access the entire file.
+    /// </para>
+    /// </summary>
+    public void InsertIntoIndexAtRoot(int rootPage, IReadOnlyList<object?> values, int rowPointer)
+    {
+        if (rootPage <= 0)
+            throw new ArgumentOutOfRangeException(nameof(rootPage), "Index root page must be positive.");
+        if (values is null || values.Count == 0)
+            throw new ArgumentException("An index entry needs at least one column value.", nameof(values));
+
+        byte[] keyBytes = values.Count == 1 && values[0] is not null
+            ? EncodeKeyBytes(values[0]!)
+            : EncodeCompositeKeyBytes(values);
+
+        byte[] root       = _file.ReadPage(rootPage);
+        bool   rootIsLeaf = root[0] == JetFormat.PageTypeIndexLeaf;
+
+        if (rootIsLeaf)
+        {
+            if (InsertIntoLeaf(rootPage, keyBytes, rowPointer) is null) return;
+            throw new NotSupportedException(
+                $"The index rooted at page {rootPage} is full and would have to grow a new " +
+                "root level, which is not supported for a non-primary index — its root-page " +
+                "field in the TDEF cannot be patched yet.");
+        }
+
+        int leafPage  = DescendToLeaf(rootPage, keyBytes);
+        var leafSplit = InsertIntoLeaf(leafPage, keyBytes, rowPointer);
+        if (leafSplit is null) return;
+
+        // The root is already a node, so the split is absorbed there — no TDEF patch needed.
+        UpdateNodeForLeafSplit(rootPage,
+            oldChildPage: leafPage, oldChildNewKey: leafSplit.Value.LeftMaxKey,
+            newChildPage: leafSplit.Value.NewSiblingPage, newChildKey: leafSplit.Value.RightMaxKey);
+    }
 
     private void InsertPrimaryKeyBytes(TableDefinition table, byte[] keyBytes, int rowPointer)
     {
@@ -386,6 +436,15 @@ public sealed class IndexWriter
             page[entryMaskPos + endPos / 8] |= (byte)(1 << (endPos % 8));
         }
         ByteUtil.PutShort(page, 2, (short)(areaSize - cursor));
+
+        // Every entry above was written in full, so the page has no shared prefix. That
+        // field must be cleared, not left as we found it: an index page Access wrote may
+        // declare a prefix (its entries omit those leading bytes), and re-writing the area
+        // with full entries while the count still says N makes every reader — Access
+        // included — strip N bytes that are really key data. The rowIds it then extracts
+        // are garbage, which surfaces as "Not a valid bookmark".
+        ByteUtil.PutShort(page, format.OffsetIndexCompressedByteCount, 0);
+
         // Re-establish page-type bytes (BuildEmptyIndexPage sets them, but we read
         // existing pages on the write path).
         page[0] = isLeaf ? JetFormat.PageTypeIndexLeaf : JetFormat.PageTypeIndexNode;
@@ -503,11 +562,17 @@ public sealed class IndexWriter
     }
 
     /// <summary>
-    /// Composite-PK encoder. Emits a single <see cref="AscStartFlag"/> prefix
-    /// followed by each column's value bytes concatenated in declared order.
-    /// Null values are not yet supported — a composite PK with a null component
-    /// would need a per-column null-marker byte (0x00 vs 0x7F prefix) which is
-    /// out of scope for this slice.
+    /// Multi-column key encoder: every column is framed with its own start-flag byte —
+    /// <c>[flag][col0][flag][col1]…</c> — and a null column collapses to a lone null-flag
+    /// byte, matching <c>IndexReader.EncodeColumnKey</c> and therefore Access.
+    /// <para>
+    /// This used to emit one flag for the whole key and concatenate the column values after
+    /// it. That is self-consistent — the writer's own lookups encode search keys the same
+    /// way, so composite primary keys round-tripped and the tests passed — but it is not
+    /// Jet's format. Entries written that way are invisible to Access *and* to
+    /// <c>IndexReader</c>, which is why a row appended to MSysObjects never showed up as a
+    /// table: Access enumerates objects through the ParentIdName index.
+    /// </para>
     /// </summary>
     internal static byte[] EncodeCompositeKeyBytes(IReadOnlyList<object?> values)
     {
@@ -515,18 +580,25 @@ public sealed class IndexWriter
             throw new ArgumentException("Composite key needs at least one value.", nameof(values));
 
         var parts = new byte[values.Count][];
-        int total = 1;   // leading flag
+        int total = 0;
         for (int i = 0; i < values.Count; i++)
         {
             if (values[i] is null)
-                throw new NotSupportedException(
-                    $"Null values in composite primary keys are not yet supported (component #{i}).");
-            parts[i] = EncodeColumnValueBytes(values[i]!);
+            {
+                parts[i] = new[] { AscNullFlag };
+            }
+            else
+            {
+                byte[] valueBytes = EncodeColumnValueBytes(values[i]!);
+                parts[i]    = new byte[1 + valueBytes.Length];
+                parts[i][0] = AscStartFlag;
+                Buffer.BlockCopy(valueBytes, 0, parts[i], 1, valueBytes.Length);
+            }
             total += parts[i].Length;
         }
+
         var buf = new byte[total];
-        buf[0] = AscStartFlag;
-        int pos = 1;
+        int pos = 0;
         for (int i = 0; i < parts.Length; i++)
         {
             Buffer.BlockCopy(parts[i], 0, buf, pos, parts[i].Length);

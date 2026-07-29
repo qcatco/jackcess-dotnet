@@ -11,15 +11,21 @@ namespace JackcessDotNet;
 ///   Type       = 1  (CatalogTypeTable)
 ///   DateCreate = now
 ///   DateUpdate = now
-///   ParentId   = 0
+///   ParentId   = id of the "Tables" container object
 ///   Flags      = 0
 ///   (all other columns remain NULL)
+///
+/// Appending the row is not enough on its own: the row must also be threaded into
+/// MSysObjects' own indexes (Access enumerates objects through ParentIdName) and given
+/// access-control entries, or Access will not see the table at all.
 /// </summary>
 public sealed class SystemCatalog
 {
     private readonly PageFile       _file;
     private readonly JetFormat      _format;
     private readonly DataPageWriter _writer;
+    private readonly PageAllocator  _allocator;
+    private readonly IndexWriter    _indexWriter;
 
     // Well-known MSysObjects column names
     private const string ColId         = "Id";
@@ -30,12 +36,15 @@ public sealed class SystemCatalog
     private const string ColParentId   = "ParentId";
     private const string ColFlags      = "Flags";
     private const string ColLvProp     = "LvProp";
+    private const string ColOwner      = "Owner";
 
     public SystemCatalog(PageFile file)
     {
-        _file   = file   ?? throw new ArgumentNullException(nameof(file));
-        _format = file.Format;
-        _writer = new DataPageWriter(file, new PageAllocator(file));
+        _file        = file ?? throw new ArgumentNullException(nameof(file));
+        _format      = file.Format;
+        _allocator   = new PageAllocator(file);
+        _writer      = new DataPageWriter(file, _allocator);
+        _indexWriter = new IndexWriter(file, _allocator);
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -45,12 +54,37 @@ public sealed class SystemCatalog
         // No-op: the embedded empty-database template already contains MSysObjects.
     }
 
+    /// <summary>Top-level parent id the container objects hang off (Jackcess DB_PARENT_ID).</summary>
+    private const int DatabaseParentId = 0x0F000000;
+    /// <summary>The container object every user table must be parented to.</summary>
+    private const string TablesContainerName = "Tables";
+    /// <summary>Table holding the access-control entries.</summary>
+    private const string AccessControlTableName = "MSysACEs";
+    /// <summary>ACM value Access writes for a newly created object (Jackcess SYS_FULL_ACCESS_ACM).</summary>
+    private const int SysFullAccessAcm = 1048575;
+
     /// <summary>
-    /// Appends a user-table entry to MSysObjects.
+    /// Appends a user-table entry to MSysObjects and gives it access-control entries, which
+    /// is what makes the table visible to Access rather than only to this library.
+    /// <para>
+    /// Two details matter and both used to be wrong: the row must be parented to the
+    /// <c>Tables</c> container object (its id is looked up, not hardcoded — Access writes a
+    /// row with <c>ParentId</c> = that container, and an object parented to 0 is in no
+    /// container so nothing lists it), and each new object needs a row per SID in
+    /// <c>MSysACEs</c> granting access. Mirrors Jackcess Java's <c>addToSystemCatalog</c> +
+    /// <c>addToAccessControlEntries</c>.
+    /// </para>
     /// </summary>
     public void InsertTableEntry(string tableName, int tdefPageNumber)
     {
         var catalogDef = BuildCatalogTableDef();
+
+        (int parentId, byte[]? containerOwner) = FindObject(DatabaseParentId, TablesContainerName);
+        if (parentId < 0)
+            throw new InvalidOperationException(
+                $"MSysObjects has no '{TablesContainerName}' container object under parent " +
+                $"0x{DatabaseParentId:X}; a table entry cannot be parented and Access would " +
+                "not list the table.");
 
         var row = new Row
         {
@@ -59,12 +93,139 @@ public sealed class SystemCatalog
             [ColType]       = (short)JetFormat.CatalogTypeTable,
             [ColDateCreate] = DateTime.Now,
             [ColDateUpdate] = DateTime.Now,
-            [ColParentId]   = 0,
-            [ColFlags]      = 0
+            [ColParentId]   = parentId,
+            [ColFlags]      = 0,
+            // Access stamps every catalog object with an owner blob; Jackcess copies an
+            // existing object's (getNewObjectOwner). A null Owner leaves the row unusable.
+            [ColOwner]      = containerOwner,
         };
 
-        _writer.InsertRow(catalogDef, row);
+        int rowPointer = _writer.InsertRow(catalogDef, row);
         _writer.IncrementTdefRowCount(JetFormat.PageSystemCatalog);
+        MaintainIndexes(catalogDef, row, rowPointer);
+
+        AddAccessControlEntries(tdefPageNumber, parentId);
+    }
+
+    /// <summary>
+    /// Threads a just-appended row into every index the table declares. Access reaches
+    /// MSysObjects rows through its indexes, so skipping this leaves a row that only a full
+    /// page scan (i.e. only this library) can find.
+    /// </summary>
+    private void MaintainIndexes(TableDefinition def, Row row, int rowPointer)
+    {
+        foreach (var ix in def.Indexes)
+        {
+            if (ix.RootPageNumber <= 0 || ix.Columns.Count == 0) continue;
+
+            var values = new List<object?>(ix.Columns.Count);
+            foreach (var ic in ix.Columns)
+                values.Add(row.TryGetValue(ic.Column.Name, out object? v) ? v : null);
+
+            _indexWriter.InsertIntoIndexAtRoot(ix.RootPageNumber, values, rowPointer);
+        }
+    }
+
+    /// <summary>
+    /// Returns the Id and Owner blob of the MSysObjects row with this name under this
+    /// parent, or (-1, null). The owner is copied onto objects created afterwards.
+    /// </summary>
+    private (int Id, byte[]? Owner) FindObject(int parentId, string name)
+    {
+        var catalogDef = BuildCatalogTableDef();
+        var columns    = catalogDef.Columns;
+        var decoder    = new RowDecoder(_format, columns);
+
+        Column? colId       = columns.FirstOrDefault(c => c.Name.Equals(ColId,       StringComparison.OrdinalIgnoreCase));
+        Column? colName     = columns.FirstOrDefault(c => c.Name.Equals(ColName,     StringComparison.OrdinalIgnoreCase));
+        Column? colParentId = columns.FirstOrDefault(c => c.Name.Equals(ColParentId, StringComparison.OrdinalIgnoreCase));
+        Column? colOwner    = columns.FirstOrDefault(c => c.Name.Equals(ColOwner,    StringComparison.OrdinalIgnoreCase));
+        if (colId is null || colName is null || colParentId is null) return (-1, null);
+
+        byte[] umapPage  = _file.ReadPage(catalogDef.UmapPageNumber);
+        var    ownedList = UsageMap.GetOwnedPages(umapPage, catalogDef.OwnedPagesRow, _format, _file);
+
+        foreach (int pageNum in ownedList)
+        {
+            byte[] dp       = _file.ReadPage(pageNum);
+            int    rowCount = ByteUtil.GetShort(dp, _format.OffsetDataNumRows);
+
+            for (int r = 0; r < rowCount; r++)
+            {
+                byte[]? rowBytes = ReadRowBytes(dp, r, _format);
+                if (rowBytes is null) continue;
+
+                if (decoder.Decode(rowBytes, colName) is not string rowName
+                    || !string.Equals(rowName, name, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (decoder.Decode(rowBytes, colParentId) is not int rowParent || rowParent != parentId)
+                    continue;
+                if (decoder.Decode(rowBytes, colId) is int id)
+                    return (id, colOwner is null ? null : decoder.Decode(rowBytes, colOwner) as byte[]);
+            }
+        }
+        return (-1, null);
+    }
+
+    /// <summary>
+    /// Copies the parent container's SIDs into MSysACEs as full-access entries for the new
+    /// object. Without them Access treats the object as inaccessible.
+    /// </summary>
+    private void AddAccessControlEntries(int objectId, int parentId)
+    {
+        int aceTdefPage = FindTableTdefPage(AccessControlTableName);
+        if (aceTdefPage < 0) return;   // template has no ACE table — nothing to maintain
+
+        var info   = TdefReader.Read(_file.ReadPage(aceTdefPage), _format);
+        var aceDef = new TableDefinition(AccessControlTableName, info.Columns)
+        {
+            TdefPageNumber = aceTdefPage,
+            UmapPageNumber = info.OwnedPagesUmapPage,
+            OwnedPagesRow  = info.OwnedPagesUmapRow,
+            FreeSpaceRow   = info.FreeSpaceUmapRow,
+            Indexes        = info.Indexes,
+        };
+
+        var columns = aceDef.Columns;
+        Column? colObjectId = columns.FirstOrDefault(c => c.Name.Equals("ObjectId", StringComparison.OrdinalIgnoreCase));
+        Column? colSid      = columns.FirstOrDefault(c => c.Name.Equals("SID",      StringComparison.OrdinalIgnoreCase));
+        if (colObjectId is null || colSid is null) return;
+
+        // Collect the SIDs already granted on the parent container.
+        var decoder = new RowDecoder(_format, columns);
+        var sids    = new List<byte[]>();
+
+        byte[] aceUmap   = _file.ReadPage(aceDef.UmapPageNumber);
+        var    aceOwned  = UsageMap.GetOwnedPages(aceUmap, aceDef.OwnedPagesRow, _format, _file);
+        foreach (int pageNum in aceOwned)
+        {
+            byte[] dp       = _file.ReadPage(pageNum);
+            int    rowCount = ByteUtil.GetShort(dp, _format.OffsetDataNumRows);
+
+            for (int r = 0; r < rowCount; r++)
+            {
+                byte[]? rowBytes = ReadRowBytes(dp, r, _format);
+                if (rowBytes is null) continue;
+                if (decoder.Decode(rowBytes, colObjectId) is not int rowObj || rowObj != parentId) continue;
+                if (decoder.Decode(rowBytes, colSid) is byte[] sid && sid.Length > 0
+                    && !sids.Any(s => s.AsSpan().SequenceEqual(sid)))
+                    sids.Add(sid);
+            }
+        }
+
+        foreach (byte[] sid in sids)
+        {
+            var aceRow = new Row
+            {
+                ["ACM"]          = SysFullAccessAcm,
+                ["FInheritable"] = false,
+                ["ObjectId"]     = objectId,
+                ["SID"]          = sid,
+            };
+            int aceRowPointer = _writer.InsertRow(aceDef, aceRow);
+            _writer.IncrementTdefRowCount(aceTdefPage);
+            MaintainIndexes(aceDef, aceRow, aceRowPointer);
+        }
     }
 
     // Flags stored on each MSysObjects row; matches Jackcess constants.
@@ -377,6 +538,7 @@ public sealed class SystemCatalog
             UmapPageNumber = info.OwnedPagesUmapPage,
             OwnedPagesRow  = info.OwnedPagesUmapRow,
             FreeSpaceRow   = info.FreeSpaceUmapRow,
+            Indexes        = info.Indexes,   // needed so appended rows can be indexed
         };
     }
 

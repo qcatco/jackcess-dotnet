@@ -160,8 +160,7 @@ public sealed class CursorTests : IDisposable
 
     public static IEnumerable<object[]> CorpusFiles()
     {
-        // Reuse CorpusTests' resolution logic by trying the same path heuristic.
-        string? root = ResolveCorpusRoot();
+        string? root = CorpusPath.Resolve();
         if (root is null) yield break;
         foreach (var ver in new[] { "V2000", "V2003" })
         {
@@ -170,12 +169,6 @@ public sealed class CursorTests : IDisposable
             foreach (string file in Directory.EnumerateFiles(dir, "common1*.mdb"))
                 yield return new object[] { ver, Path.GetFileName(file), file };
         }
-    }
-
-    private static string? ResolveCorpusRoot()
-    {
-        const string hardcoded = @"D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data";
-        return Directory.Exists(hardcoded) ? hardcoded : null;
     }
 
     [Theory]

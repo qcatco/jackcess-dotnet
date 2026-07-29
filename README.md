@@ -6,9 +6,12 @@
 [![Repo](https://img.shields.io/badge/repo-jackcess--dotnet-181717?logo=github)](https://github.com/mehran-ghanizadeh/jackcess-dotnet)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-Pure .NET 8 library for reading and writing Microsoft Access (`.mdb` / `.accdb`) files.
-No ODBC, no ACE drivers, no native dependencies — runs anywhere .NET 8 runs
-(Windows, Linux, macOS, containers).
+Pure .NET 10 library for reading and writing Microsoft Access (`.mdb` / `.accdb`) files.
+No ODBC, no ACE drivers, no native dependencies, no NuGet dependencies — runs anywhere
+.NET 10 runs (Windows, Linux, macOS, containers).
+
+> **2.0.0 targets `net10.0`.** 1.2.x is the last `net8.0` release; stay on it if you
+> cannot move off .NET 8.
 
 This is a C# port of the [`spannm/jackcess`](https://github.com/spannm/jackcess) Java
 project (a maintained fork of the original [Jackcess](https://jackcess.sourceforge.io/)
@@ -137,6 +140,8 @@ materialising the whole table.
 | Read ACE 12 / 14 / 16 / 17 (`.accdb`)             | ✅      |
 | Create new `.mdb` files (Jet 4 / Jet 3)           | ✅      |
 | Row CRUD + B-tree indexes (single-column PK)      | ✅      |
+| **Files and tables Microsoft Access can open**    | ✅ Both paths verified against the ACE engine³ |
+| Appending into large existing files               | ✅ Inline usage-map window slides, then promotes to a reference map² |
 | Memo / OLE long values                            | ✅      |
 | PropertyMap & MSysRelationships                   | ✅      |
 | Password-protected `.mdb` (Jet RC4 codec)         | ✅      |
@@ -148,6 +153,18 @@ materialising the whole table.
 | Multi-column primary keys                         | ✅      |
 | Foreign-key enforcement on insert (opt-in)        | ✅ Restrict-only |
 | Queries (`MSysQueries`)                           | ❌ Not yet |
+
+³ Two paths, both checked by reading the result back through
+`Microsoft.ACE.OLEDB.12.0`: creating a file and a table from scratch, and appending
+into a table an Access-authored file already contains. Before 2.2.0 the first was
+unreadable by Access and the second garbled Latin-1 text — see the 2.2.0 entry in
+CHANGELOG.md for the five on-disk details involved.
+
+² A table's data pages are tracked in a usage map whose inline bitmap addresses a
+fixed window — as little as 512 pages (~2 MB) in Access-authored files. The window
+slides to follow the table, and once the table outgrows one bitmap the map is
+promoted to reference-style (~2.2 GB of reach, past Access's own file limit).
+Before 2.0.0 an append past the window threw.
 
 ¹ Agile write doesn't recompute the DataIntegrity HMAC, so files modified
 through this library round-trip cleanly through `Database.Open(path, password)`
