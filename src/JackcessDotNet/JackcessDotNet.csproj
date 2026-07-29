@@ -46,9 +46,11 @@
       COUNT(*) and MAX from an index, and a zero count made it fail them), and an
       index leaf now splits correctly even in a tree Access wrote — previously the
       new root was recorded against the wrong index, because Access does not order a
-      TDEF's index-data blocks to match its index slots. Reading complex columns
-      (multi-value, attachment, append-only memo) is new. Breaking: IndexWriter's
-      per-index methods take an Index rather than an ordinal. See CHANGELOG.md.
+      TDEF's index-data blocks to match its index slots. New: creating secondary
+      indexes (Database.CreateIndex, single or composite, filled from the rows
+      already stored) and reading complex columns (multi-value, attachment,
+      append-only memo). Breaking: IndexWriter's per-index methods take an Index
+      rather than an ordinal. See CHANGELOG.md.
     </PackageReleaseNotes>
   </PropertyGroup>
 

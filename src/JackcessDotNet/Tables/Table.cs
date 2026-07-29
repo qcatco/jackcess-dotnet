@@ -32,6 +32,8 @@ public sealed class Table
     /// <summary>Indexes defined on this table (read from the on-disk TDEF).</summary>
     public IReadOnlyList<Index>  Indexes => _definition.Indexes;
 
+    internal TableDefinition     Definition => _definition;
+
     private PropertyMaps? _propertiesCache;
     /// <summary>
     /// Property maps attached to this table in MSysObjects.LvProp. The
@@ -308,6 +310,14 @@ public sealed class Table
     /// insertion order.  Follows LVAL page chains for Memo/OLE columns.
     /// </summary>
     public IReadOnlyList<Row> ReadAllRows()
+        => EnumerateRowsWithPointers().Select(r => r.Row).ToList();
+
+    /// <summary>
+    /// The same scan as <see cref="ReadAllRows"/>, keeping each row's pointer — the
+    /// <c>(page &lt;&lt; 16) | rowIndex</c> identity an index entry has to point at, packed the
+    /// way <c>DataPageWriter.InsertRow</c> returns it.
+    /// </summary>
+    internal List<(Row Row, int RowPointer)> EnumerateRowsWithPointers()
     {
         var format     = _file.Format;
         var lvalReader = _definition.LvalColumnUmapPages.Count > 0
@@ -318,7 +328,7 @@ public sealed class Table
         byte[] umapPage  = _file.ReadPage(_definition.UmapPageNumber);
         var    ownedList = UsageMap.GetOwnedPages(umapPage, _definition.OwnedPagesRow, format, _file);
 
-        var result = new List<Row>();
+        var result = new List<(Row, int)>();
         foreach (int pageNum in ownedList)
         {
             byte[] dp       = _file.ReadPage(pageNum);
@@ -350,9 +360,45 @@ public sealed class Table
                     if (val is not null)
                         row[col.Name] = val;
                 }
-                result.Add(row);
+                result.Add((row, (pageNum << 16) | r));
             }
         }
         return result;
+    }
+
+    /// <summary>
+    /// Fills a just-created index from the rows already in the table. An index Access can see but
+    /// that answers nothing is worse than no index at all, since Access reads through it.
+    /// </summary>
+    /// <exception cref="NotSupportedException">
+    /// The tree outgrew what the writer can maintain partway through, leaving the index
+    /// incomplete — see <see cref="IndexWriter.WouldExceedIndexCapacity"/>.
+    /// </exception>
+    internal void BackfillIndex(string indexName)
+    {
+        var ix = _definition.Indexes.FirstOrDefault(
+            i => i.Name.Equals(indexName, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException(
+                $"Table '{Name}' has no index named '{indexName}' to fill.");
+
+        var writer = new IndexWriter(_file, _allocator);
+        int done   = 0;
+
+        foreach (var (row, rowPtr) in EnumerateRowsWithPointers())
+        {
+            var values = IndexValuesFor(ix, row, out bool anyNull);
+            if (anyNull && ix.IgnoresNulls) continue;
+
+            if (writer.WouldExceedIndexCapacity(_definition, ix, values))
+                throw new NotSupportedException(
+                    $"Index '{ix.Name}' on '{Name}' outgrew what this writer can maintain after " +
+                    $"{done} of the table's rows, so it is now incomplete and Access would " +
+                    "under-report rows for queries that use it. The index is on disk: drop it in " +
+                    "Access, or rebuild the table with fewer rows per index page.");
+
+            writer.InsertIntoIndex(_definition, ix, values, rowPtr);
+            writer.IncrementIndexRowCount(_definition, ix);
+            done++;
+        }
     }
 }

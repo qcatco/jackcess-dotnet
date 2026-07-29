@@ -143,7 +143,7 @@ materialising the whole table.
 | **Files and tables Microsoft Access can open**    | ✅ Both paths verified against the ACE engine³ |
 | Appending into large existing files               | ✅ Inline usage-map window slides, then promotes to a reference map² |
 | Maintaining *every* index of a table on insert    | ✅ Including leaf splits in trees Access wrote⁴ |
-| Creating secondary indexes                        | ❌ Not yet — only a primary key |
+| Creating secondary indexes                        | ✅ `Database.CreateIndex`, single or composite, backfilled⁵ |
 | Reading complex columns (multi-value, attachment, memo history) | ✅ `Table.GetComplexValues` |
 | Memo / OLE long values                            | ✅      |
 | PropertyMap & MSysRelationships                   | ✅      |
@@ -171,6 +171,13 @@ wrote, which needs the new root recorded against the right index-data block rath
 the right *slot*; the two are ordered independently. Two cases still throw rather than
 risk an index: a page Access prefix-compressed, and a split needing a third level.
 `Table.ForceIgnoreIndexCheck` inserts anyway and leaves that index short.
+
+⁵ `db.CreateIndex("People", "ByName", "Name")` — up to 10 ascending columns, spliced into
+the table's existing definition and then filled from the rows already stored, so it
+answers queries immediately. Access lists it (verified through ADOX) and uses it for
+seeks, `ORDER BY`, `GROUP BY` and `MAX`. Two caveats: the definition has to still fit on
+one page (a wide table can leave no room), and `unique: true` is recorded for Access's
+benefit but is **not** enforced by this library's own inserts.
 
 ² A table's data pages are tracked in a usage map whose inline bitmap addresses a
 fixed window — as little as 512 pages (~2 MB) in Access-authored files. The window

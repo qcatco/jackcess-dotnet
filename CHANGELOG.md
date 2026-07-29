@@ -39,6 +39,17 @@ files the ACE engine wrote and querying the results back through
 
 ### Added
 
+- **Creating secondary indexes** — `Database.CreateIndex(table, name, columns…)`, single-column
+  or composite (up to Jet's 10), optionally flagged unique. A TDEF interleaves per-index with
+  per-column data, so an index is not one record that could be appended: its row-count block
+  sits before the column definitions, its column block and slot after the column names, and its
+  name after the other index names. The new sections are spliced in, copying every existing byte
+  through unchanged rather than re-deriving the definition — the exact bytes Access accepts were
+  established one field at a time, and re-serialising would risk all of it. The tree is then
+  filled from the rows already stored, because an index Access can see but that answers nothing
+  is worse than no index. Access lists the result through ADOX and uses it for seeks, `ORDER BY`,
+  `GROUP BY` and `MAX`. Two limits: the definition must still fit on one page, and `unique` is
+  recorded for Access's benefit but not enforced by this library's inserts.
 - **Reading complex columns** — multi-value fields, attachment fields and append-only memo
   history, via `Table.GetComplexValues(row, columnName)`. The row stores a 4-byte id;
   `MSysComplexColumns` maps the column to its flat table, and the returned rows are that

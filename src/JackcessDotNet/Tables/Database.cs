@@ -533,6 +533,84 @@ public sealed class Database : IDisposable
     }
 
     /// <summary>
+    /// Adds a secondary index to an existing table and fills it from the rows already there.
+    /// <para>
+    /// The columns are indexed ascending, in the order given, up to Jet's limit of 10. The index
+    /// is never a primary key — a table gets its primary key at
+    /// <see cref="CreateTable(string, IReadOnlyList{Column}, string?)"/> time.
+    /// </para>
+    /// <para>
+    /// <paramref name="unique"/> is recorded in the index's flags, so Access enforces it for its
+    /// own writes; <see cref="Table.Insert"/> does <em>not</em> check it, and inserting a
+    /// duplicate through this library will produce an index Access considers corrupt. Pass it
+    /// only for a column set you know is already unique and will stay so.
+    /// </para>
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// The table has no such column, already has an index of that name, or would exceed 10
+    /// indexed columns.
+    /// </exception>
+    /// <exception cref="NotSupportedException">
+    /// The table's definition spans several pages, or has no room left for another index.
+    /// </exception>
+    public Table CreateIndex(string tableName, string indexName, params string[] columns)
+        => CreateIndex(tableName, indexName, unique: false, columns);
+
+    /// <inheritdoc cref="CreateIndex(string, string, string[])"/>
+    public Table CreateIndex(string tableName, string indexName, bool unique, params string[] columns)
+    {
+        if (string.IsNullOrWhiteSpace(tableName))  throw new ArgumentException("Table name must not be empty.", nameof(tableName));
+        if (string.IsNullOrWhiteSpace(indexName))  throw new ArgumentException("Index name must not be empty.", nameof(indexName));
+        if (columns is null || columns.Length == 0) throw new ArgumentException("An index needs at least one column.", nameof(columns));
+        if (columns.Length > 10)
+            throw new InvalidOperationException(
+                $"An index is limited to 10 columns; '{indexName}' names {columns.Length}.");
+
+        var table = GetTable(tableName);
+        var def   = table.Definition;
+
+        if (def.Indexes.Any(ix => ix.Name.Equals(indexName, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException(
+                $"Table '{tableName}' already has an index named '{indexName}'.");
+
+        var columnNumbers = columns.Select(name =>
+        {
+            var col = def.Columns.FirstOrDefault(
+                c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (col is null)
+                throw new InvalidOperationException(
+                    $"Index column '{name}' not found in table '{tableName}'.");
+            return (short)col.ColumnNumber;
+        }).ToList();
+
+        // The index needs its own page map before the root page exists, since the map has to
+        // record it. A page of its own rather than another row on the table's map: rows on an
+        // existing usage-map page cannot be appended to in place. Two rows is the minimum such a
+        // page carries, so row 1 goes unused.
+        var idxWriter = new IndexWriter(_file, _allocator);
+        int umapPage  = _allocator.AllocateUmapPage();
+        int rootPage  = idxWriter.CreateEmptyLeafPage();
+
+        byte[] umap = _file.ReadPage(umapPage);
+        UsageMap.AddPage(umap, 0, rootPage, _file.Format, _allocator, _file);
+        _file.WritePage(umapPage, umap);
+
+        TdefIndexAppender.Append(_file, def.TdefPageNumber, new TdefIndexAppender.NewIndex(
+            Name:          indexName,
+            ColumnNumbers: columnNumbers,
+            RootPage:      rootPage,
+            UmapPage:      umapPage,
+            UmapRow:       0,
+            IsUnique:      unique));
+
+        // Re-read the table so its definition carries the new index, then index what is already
+        // stored: an index Access can see but that answers nothing is worse than none.
+        var updated = GetTable(tableName);
+        updated.BackfillIndex(indexName);
+        return updated;
+    }
+
+    /// <summary>
     /// Opens an existing user table by name (scans MSysObjects).
     /// </summary>
     public Table GetTable(string name)
