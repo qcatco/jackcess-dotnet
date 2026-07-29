@@ -159,17 +159,20 @@ public sealed class TableDefinition
         // The page buffer is always a full page; content starts at byte 0.
         var page = new byte[format.PageSize];
 
-        // Bytes 2-3 hold the page's remaining free space. Access accounts for it as
-        // PageSize - 8 - definitionLength (an Access-written 1002-byte definition in a
-        // 4096-byte page records 3086), so mirror that rather than leaving it zero.
-        ByteUtil.PutShort(page, 2, (short)(format.PageSize - 8 - contentSize));
-
         // ── 8-byte page prefix ────────────────────────────────────────────────
         page[0] = JetFormat.PageTypeTableDef;
         page[1] = 0x01;
-        page[2] = 0x00;
-        page[3] = 0x00;
         ByteUtil.PutInt(page, 4, 0);   // next-TDEF-page = 0 (single-page table def)
+
+        // Bytes 2-3 hold the page's remaining free space. Access accounts for it as
+        // PageSize - 8 - definitionLength (an Access-written 1002-byte definition in a
+        // 4096-byte page records 3086), so mirror that rather than leaving it zero.
+        //
+        // This has to come *after* the prefix bytes above. Written before them, the two zeroed
+        // bytes that used to follow — a hand-written page[2] = page[3] = 0x00 — overwrote it, so
+        // every definition this library produced recorded free space 0 while the code read as
+        // though it recorded the real figure.
+        ByteUtil.PutShort(page, 2, (short)(format.PageSize - 8 - contentSize));
 
         int pos = 8;
 
