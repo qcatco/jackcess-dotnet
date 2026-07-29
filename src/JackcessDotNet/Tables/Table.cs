@@ -79,9 +79,10 @@ public sealed class Table
 
         _owningDb?.ValidateForeignKeysForInsert(this, row);
 
-        // Decide about the indexes *before* writing the row: if one cannot be kept correct,
-        // nothing should be written at all.
+        // Decide about the indexes *before* writing the row: if one cannot be kept correct, or the
+        // row would repeat a key a unique index promises is unique, nothing should be written.
         var skipIndexes = PlanIndexMaintenance(row);
+        EnforceUniqueIndexes(row);
 
         int rowPtr = _dataWriter.InsertRow(_definition, row);
         _dataWriter.IncrementTdefRowCount(_definition.TdefPageNumber);
@@ -164,6 +165,77 @@ public sealed class Table
         }
 
         return skip;
+    }
+
+    /// <summary>
+    /// Rejects a row that would repeat a key held by a unique index — every primary key, and any
+    /// secondary index created with <c>unique: true</c>.
+    /// <para>
+    /// A unique index tells Access no key repeats, and Access reads the index trusting that. Letting
+    /// a duplicate through produced a file Access considers corrupt rather than one it merely
+    /// disagrees with. Checked before anything is written, so a rejected row leaves nothing behind.
+    /// </para>
+    /// <para>
+    /// A key with a null component is exempt: SQL treats null as unequal to everything, itself
+    /// included. Access counts nulls as values here and would reject the second one, so this is a
+    /// deliberate divergence.
+    /// </para>
+    /// </summary>
+    private void EnforceUniqueIndexes(Row row)
+    {
+        var seen = new HashSet<int>();
+
+        foreach (var ix in IndexesForMaintenance())
+        {
+            if (!ix.IsUnique || ix.RootPageNumber <= 0 || ix.Columns.Count == 0) continue;
+            if (!seen.Add(ix.IndexDataNumber)) continue;
+
+            var values = IndexValuesFor(ix, row, out bool anyNull);
+            if (anyNull) continue;
+
+            if (FindExistingKey(ix, values) is int clashingRowPtr)
+                throw new InvalidOperationException(
+                    $"Index '{ix.Name}' on '{Name}' is unique and already holds the key " +
+                    $"({string.Join(", ", values)}), on the row at page " +
+                    $"{(clashingRowPtr >> 16) & 0xFFFFFF} slot {clashingRowPtr & 0xFF}. " +
+                    "Nothing was written.");
+        }
+    }
+
+    /// <summary>
+    /// The row pointer of a live row already carrying this key, or null.
+    /// <para>
+    /// The index is only a starting point: an entry can outlive its row in a file written before
+    /// deletes kept indexes in step, so each candidate is read back and its values compared. A
+    /// stale entry must not block an insert.
+    /// </para>
+    /// </summary>
+    private int? FindExistingKey(Index ix, IReadOnlyList<object?> values)
+    {
+        var reader = new IndexReader(_file, ix);
+        var cursor = NewCursorInternal();
+
+        var pointers = ix.Columns.Count == 1
+            ? reader.FindRowPointers(values[0]!)
+            : reader.FindRowPointersForEntry(values.ToArray());
+
+        foreach (int rowPtr in pointers)
+        {
+            Row? existing;
+            try { existing = cursor.ReadRowAt((rowPtr >> 16) & 0xFFFFFF, rowPtr & 0xFF); }
+            catch { continue; }
+            if (existing is null) continue;
+
+            bool allMatch = true;
+            for (int i = 0; i < ix.Columns.Count && allMatch; i++)
+            {
+                existing.TryGetValue(ix.Columns[i].Column.Name, out object? stored);
+                allMatch = ValuesMatch(stored, values[i]);
+            }
+            if (allMatch) return rowPtr;
+        }
+
+        return null;
     }
 
     private static List<object?> IndexValuesFor(Index ix, Row row, out bool anyNull)
