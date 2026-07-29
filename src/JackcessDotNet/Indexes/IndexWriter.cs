@@ -32,6 +32,13 @@ public sealed class IndexWriter
     private const int  NoPage         = unchecked((int)0xFFFFFFFF);
     private const byte AscStartFlag   = 0x7F;
     private const byte AscNullFlag    = 0x00;
+    /// <summary>
+    /// How many levels a descent will follow before treating the tree as corrupt. Jet indexes are
+    /// far shallower than this — a 4 KB page fits hundreds of children, so three levels already
+    /// address tens of millions of rows — so the bound only stops a cycle from spinning forever.
+    /// </summary>
+    private const int  MaxTreeDepth   = 32;
+
     private const int  LeafTrailerLen = 4;   // 3-byte BE page + 1-byte row
     private const int  NodeTrailerLen = 8;   // leaf trailer + 4-byte BE sub-page
 
@@ -155,21 +162,23 @@ public sealed class IndexWriter
     /// </summary>
 
     /// <summary>
-    /// Whether adding this entry would exceed what this writer can maintain — that is, whether
-    /// it needs a tree deeper than root-node-plus-leaves, or a page whose entries this writer
-    /// cannot re-emit. Reads only; nothing is modified.
+    /// Whether adding this entry would exceed what this writer can maintain. Reads only; nothing
+    /// is modified.
     /// <para>
-    /// A leaf split is fine, in a tree this library grew and in one Access wrote: the halves and
-    /// the parent entry are written in Access's own shape, and Access seeks, ranges and
-    /// aggregates over the result. Two cases still are not:
+    /// Almost nothing does any more. A leaf split is written in Access's own shape, in a tree this
+    /// library grew and in one Access wrote; a page Access <em>prefix-compressed</em> is expanded
+    /// by <see cref="ReadEntries"/> and re-emitted in full with a zeroed prefix count, which
+    /// Access reads; and a full node splits in two under a new level. All three were refused at
+    /// some point, the first two on measurements taken while a separate bug was cross-wiring index
+    /// roots between index-data blocks — once that was fixed, each verified clean against the ACE
+    /// engine.
     /// </para>
-    /// <list type="bullet">
-    ///   <item>a leaf Access <em>prefix-compressed</em> — expanding those entries and re-emitting
-    ///         them in full leaves Access unable to seek the page, though its aggregates still
-    ///         answer. Pages this library writes are never compressed;</item>
-    ///   <item>a split that would have to grow a third level, i.e. one whose new parent entry
-    ///         does not fit in the root node. Splitting a node is not written yet.</item>
-    /// </list>
+    /// <para>
+    /// What remains is the one case no split can fix: a single entry too large to share a page
+    /// with any other, which needs three entries' worth of room to split a node. Jet caps an index
+    /// key at 255 bytes, so this is unreachable on a 2 KB or 4 KB page and the check is a
+    /// backstop rather than a real limit.
+    /// </para>
     /// </summary>
     public bool WouldExceedIndexCapacity(TableDefinition table, Index index,
                                          IReadOnlyList<object?> values)
@@ -177,41 +186,14 @@ public sealed class IndexWriter
         if (table is null) throw new ArgumentNullException(nameof(table));
         if (index is null) throw new ArgumentNullException(nameof(index));
 
-        int rootPage = index.RootPageNumber;
-        if (rootPage <= 0) return false;
+        if (index.RootPageNumber <= 0) return false;
 
-        var    format   = _file.Format;
-        byte[] keyBytes = EncodeEntryKey(values);
-        byte[] root     = _file.ReadPage(rootPage);
-
-        int leafPage = root[0] == JetFormat.PageTypeIndexLeaf
-            ? rootPage
-            : DescendToLeaf(rootPage, keyBytes);
-
-        byte[] leaf = _file.ReadPage(leafPage);
-
-        if (ByteUtil.GetUShort(leaf, format.OffsetIndexCompressedByteCount) > 0) return true;
-
-        var entries = ReadEntries(leaf, format, isLeaf: true);
-
+        var format          = _file.Format;
         int entriesAreaSize = format.PageSize - format.OffsetIndexEntryMask - format.SizeIndexEntryMask;
-        // One bit of the entry mask marks each entry's end, so the mask caps the entry count.
-        int maxEntries      = format.SizeIndexEntryMask * 8;
-        int totalBytes      = entries.Sum(e => e.RawBytes.Length) + keyBytes.Length + LeafTrailerLen;
-        bool leafWillSplit  = totalBytes > entriesAreaSize || entries.Count + 1 > maxEntries;
 
-        if (!leafWillSplit) return false;
-
-        // The split has to be absorbed one level up. A root that is still a leaf becomes the
-        // first node of a two-level tree, which always fits. A root that is already a node takes
-        // one more child entry, and if that does not fit the node itself would have to split.
-        if (root[0] == JetFormat.PageTypeIndexLeaf) return false;
-
-        if (ByteUtil.GetUShort(root, format.OffsetIndexCompressedByteCount) > 0) return true;
-
-        var  nodeEntries = ReadEntries(root, format, isLeaf: false);
-        int  nodeBytes   = nodeEntries.Sum(e => e.RawBytes.Length) + keyBytes.Length + NodeTrailerLen;
-        return nodeBytes > entriesAreaSize || nodeEntries.Count + 1 > maxEntries;
+        // A node needs a separator plus a child on each side, so three of these have to fit.
+        int nodeEntrySize = EncodeEntryKey(values).Length + NodeTrailerLen;
+        return nodeEntrySize * 3 > entriesAreaSize;
     }
 
     /// <summary>
@@ -264,40 +246,14 @@ public sealed class IndexWriter
         int rootPage = index.RootPageNumber;
         if (rootPage <= 0) return;   // index with no tree to maintain
 
-        byte[] keyBytes   = EncodeEntryKey(values);
-        byte[] root       = _file.ReadPage(rootPage);
-        bool   rootIsLeaf = root[0] == JetFormat.PageTypeIndexLeaf;
+        int newRoot = InsertIntoTree(rootPage, EncodeEntryKey(values), rowPointer);
+        if (newRoot == 0) return;    // absorbed somewhere below the root
 
-        if (rootIsLeaf)
-        {
-            var split = InsertIntoLeaf(rootPage, keyBytes, rowPointer);
-            if (split is null) return;
-
-            // Promote: a node above the two halves becomes the new root, and the TDEF has to
-            // point at it — patching this index's own block, not blindly the first one.
-            int newRoot = CreateRootNode(
-                leftPage:      rootPage,
-                leftMaxKey:    split.Value.LeftMaxKey,
-                leftMaxRowPtr: split.Value.LeftMaxRowPtr,
-                rightPage:     split.Value.NewSiblingPage);
-            index.RootPageNumber = newRoot;
-            if (index.IsPrimaryKey) table.PrimaryKeyIndexPage = newRoot;
-            PatchTdefRoot(table, index, newRoot);
-            return;
-        }
-
-        int leafPage  = DescendToLeaf(rootPage, keyBytes);
-        var leafSplit = InsertIntoLeaf(leafPage, keyBytes, rowPointer);
-        if (leafSplit is null) return;
-
-        // The root is already a node, so the split is absorbed there — no TDEF patch needed.
-        UpdateNodeForLeafSplit(rootPage,
-            oldChildPage: leafPage,
-            oldChildNewKey: leafSplit.Value.LeftMaxKey,
-            oldChildMaxRowPtr: leafSplit.Value.LeftMaxRowPtr,
-            newChildPage: leafSplit.Value.NewSiblingPage,
-            newChildKey: leafSplit.Value.RightMaxKey,
-            newChildMaxRowPtr: leafSplit.Value.RightMaxRowPtr);
+        // The root moved, so the TDEF has to point at the new one — this index's own block, not
+        // blindly the first.
+        index.RootPageNumber = newRoot;
+        if (index.IsPrimaryKey) table.PrimaryKeyIndexPage = newRoot;
+        PatchTdefRoot(table, index, newRoot);
     }
 
     private void InsertPrimaryKeyBytes(TableDefinition table, byte[] keyBytes, int rowPointer)
@@ -307,56 +263,23 @@ public sealed class IndexWriter
                 "Table has no primary key index page. " +
                 "Specify a primary key column name when calling Database.CreateTable.");
 
-        var format = _file.Format;
+        int newRoot = InsertIntoTree(table.PrimaryKeyIndexPage, keyBytes, rowPointer);
+        if (newRoot == 0) return;   // absorbed somewhere below the root
 
-        int rootPage = table.PrimaryKeyIndexPage;
-        byte[] root = _file.ReadPage(rootPage);
-        bool rootIsLeaf = root[0] == JetFormat.PageTypeIndexLeaf;
+        table.PrimaryKeyIndexPage = newRoot;
 
-        if (rootIsLeaf)
+        // Patch the primary key's own block. A table this library created has one index and so
+        // uses block 0; a table read back from disk carries the block on its metadata, and Access
+        // does not order the blocks to match the slots.
+        var pk = table.Indexes.FirstOrDefault(ix => ix.IsPrimaryKey);
+        if (pk is null)
         {
-            // Two-level path: try inserting into the root leaf directly.
-            var split = InsertIntoLeaf(rootPage, keyBytes, rowPointer);
-            if (split is null) return;
-
-            // Leaf split — promote: create a node above pointing at both halves.
-            int newRoot = CreateRootNode(
-                leftPage:      rootPage,
-                leftMaxKey:    split.Value.LeftMaxKey,
-                leftMaxRowPtr: split.Value.LeftMaxRowPtr,
-                rightPage:     split.Value.NewSiblingPage);
-            table.PrimaryKeyIndexPage = newRoot;
-
-            // Patch the primary key's own block. A table this library created has one index and
-            // so uses block 0; a table read back from disk carries the block on its metadata,
-            // and Access does not order the blocks to match the slots.
-            var pk = table.Indexes.FirstOrDefault(ix => ix.IsPrimaryKey);
-            if (pk is null)
-            {
-                PatchTdefRootForDataBlock(table, 0, newRoot);
-                return;
-            }
-
-            pk.RootPageNumber = newRoot;
-            PatchTdefRoot(table, pk, newRoot);
+            PatchTdefRootForDataBlock(table, 0, newRoot);
             return;
         }
 
-        // Three-level path: root is a node. Descend to the right leaf, insert, and
-        // if it splits, update the node entry's key + insert a new entry.
-        int leafPage = DescendToLeaf(rootPage, keyBytes);
-        var leafSplit = InsertIntoLeaf(leafPage, keyBytes, rowPointer);
-        if (leafSplit is null) return;
-
-        // Update node to reflect the leaf split: child's key shrinks to LeftMaxKey,
-        // and we add a new entry pointing at the new sibling with RightMaxKey.
-        UpdateNodeForLeafSplit(rootPage,
-            oldChildPage: leafPage,
-            oldChildNewKey: leafSplit.Value.LeftMaxKey,
-            oldChildMaxRowPtr: leafSplit.Value.LeftMaxRowPtr,
-            newChildPage: leafSplit.Value.NewSiblingPage,
-            newChildKey: leafSplit.Value.RightMaxKey,
-            newChildMaxRowPtr: leafSplit.Value.RightMaxRowPtr);
+        pk.RootPageNumber = newRoot;
+        PatchTdefRoot(table, pk, newRoot);
     }
 
     // ── Internals ────────────────────────────────────────────────────────────
@@ -438,10 +361,14 @@ public sealed class IndexWriter
     }
 
     /// <summary>
-    /// Records a leaf split in the node above it, keeping Access's shape: every child except
+    /// Records a child's split in the node above it, keeping Access's shape: every child except
     /// the last has an entry, and the last is reached through the page's child-tail pointer.
     /// </summary>
-    private void UpdateNodeForLeafSplit(
+    /// <returns>
+    /// <c>null</c> when the node absorbed the extra child; otherwise the page number of the new
+    /// sibling the node itself split into, which its own parent has to record in turn.
+    /// </returns>
+    private int? InsertChildIntoNode(
         int nodePage, int oldChildPage, byte[] oldChildNewKey, int oldChildMaxRowPtr,
         int newChildPage, byte[] newChildKey, int newChildMaxRowPtr)
     {
@@ -474,13 +401,179 @@ public sealed class IndexWriter
         }
 
         int entriesAreaSize = format.PageSize - format.OffsetIndexEntryMask - format.SizeIndexEntryMask;
-        int totalBytes = entries.Sum(e => e.RawBytes.Length);
-        if (totalBytes > entriesAreaSize || entries.Count > 3624)
-            throw new NotSupportedException(
-                $"Root node is full ({entries.Count} children). " +
-                "Tree depths greater than 2 (root node + leaves) are not yet supported.");
+        int totalBytes      = entries.Sum(e => e.RawBytes.Length);
+        if (totalBytes <= entriesAreaSize && entries.Count <= format.SizeIndexEntryMask * 8)
+        {
+            WriteEntries(nodePage, entries, format, isLeaf: false);
+            return null;
+        }
 
-        WriteEntries(nodePage, entries, format, isLeaf: false);
+        return SplitNode(nodePage, page, entries);
+    }
+
+    /// <summary>
+    /// Splits a full node in two, adding a level to the tree.
+    /// <para>
+    /// A node covers children <c>c0..cn</c> as an entry per child except the last plus a
+    /// child-tail pointer at <c>cn</c>, and entry <c>ei</c> carries the greatest key in
+    /// <c>ci</c>'s subtree. Splitting at entry <c>m</c> leaves <c>c0..cm</c> on this page — the
+    /// entries before <c>m</c>, with <c>cm</c> becoming its tail — and moves <c>c(m+1)..cn</c> to
+    /// a new page that inherits the old tail. Entry <c>m</c> itself belongs to neither half: it
+    /// is the separator, and its key is what the parent records for this page.
+    /// </para>
+    /// </summary>
+    /// <returns>The new sibling's page number.</returns>
+    private int SplitNode(int nodePage, byte[] page, List<RawEntry> entries)
+    {
+        var format = _file.Format;
+
+        // Two halves and a separator need three entries. Fewer means one entry alone overflows a
+        // page, which no amount of splitting fixes.
+        if (entries.Count < 3)
+            throw new NotSupportedException(
+                $"Node p{nodePage} overflows with only {entries.Count} entries, so its keys are too " +
+                "large for a page and splitting cannot help. Index such a column with fewer or " +
+                "shorter key columns.");
+
+        int mid       = entries.Count / 2;
+        var left      = entries.GetRange(0, mid);
+        var separator = entries[mid];
+        var right     = entries.GetRange(mid + 1, entries.Count - mid - 1);
+
+        // Read the tail as it stands now — the caller may just have repointed it.
+        int oldTail  = ByteUtil.GetInt(page, format.OffsetChildTailIndexPage);
+        int origNext = ByteUtil.GetInt(page, format.OffsetNextIndexPage);
+
+        int    rightPage = _allocator.AllocatePage();
+        byte[] rightPg   = BuildEmptyIndexPage(format, isLeaf: false);
+        ByteUtil.PutInt(rightPg, format.OffsetPrevIndexPage,      nodePage);
+        ByteUtil.PutInt(rightPg, format.OffsetNextIndexPage,      origNext);
+        ByteUtil.PutInt(rightPg, format.OffsetChildTailIndexPage, oldTail);
+        _file.WritePage(rightPage, rightPg);
+
+        // This page keeps the lower children; the separator's child becomes its tail.
+        ByteUtil.PutInt(page, format.OffsetNextIndexPage,      rightPage);
+        ByteUtil.PutInt(page, format.OffsetChildTailIndexPage, separator.SubPage);
+        _file.WritePage(nodePage, page);
+
+        WriteEntries(nodePage,  left,  format, isLeaf: false);
+        WriteEntries(rightPage, right, format, isLeaf: false);
+
+        return rightPage;
+    }
+
+    /// <summary>
+    /// Inserts one entry into the tree at <paramref name="rootPage"/>, splitting pages up the
+    /// path as far as it has to.
+    /// <para>
+    /// Descent records the nodes it passes so a split can be walked back up: the leaf's parent
+    /// takes the new sibling, and if that fills, it splits too and its own parent takes over,
+    /// until either some node absorbs the extra child or the root itself splits and a new root
+    /// goes above it.
+    /// </para>
+    /// </summary>
+    /// <returns>
+    /// The new root page when the root split — the caller has to record it in the TDEF — or
+    /// <c>0</c> when the root did not move.
+    /// </returns>
+    private int InsertIntoTree(int rootPage, byte[] keyBytes, int rowPointer)
+    {
+        var (nodes, leafPage) = DescendPath(rootPage, keyBytes);
+
+        var leafSplit = InsertIntoLeaf(leafPage, keyBytes, rowPointer);
+        if (leafSplit is null) return 0;
+
+        int child   = leafPage;
+        int sibling = leafSplit.Value.NewSiblingPage;
+
+        for (int level = nodes.Count - 1; level >= 0; level--)
+        {
+            // Both halves are on disk, so each one's greatest key is read back from it rather
+            // than threaded through the recursion — a node's own greatest key is not stored
+            // anywhere on it, only in its parent.
+            var (leftKey,  leftRowPtr)  = GreatestKeyIn(child);
+            var (rightKey, rightRowPtr) = GreatestKeyIn(sibling);
+
+            int? nodeSibling = InsertChildIntoNode(
+                nodes[level], child, leftKey, leftRowPtr, sibling, rightKey, rightRowPtr);
+            if (nodeSibling is null) return 0;
+
+            child   = nodes[level];
+            sibling = nodeSibling.Value;
+        }
+
+        var (rootKey, rootRowPtr) = GreatestKeyIn(child);
+        return CreateRootNode(child, rootKey, rootRowPtr, sibling);
+    }
+
+    /// <summary>
+    /// The greatest key in the subtree at <paramref name="page"/>, found by following the
+    /// rightmost child down to a leaf and taking its last entry.
+    /// </summary>
+    private (byte[] Key, int RowPtr) GreatestKeyIn(int page)
+    {
+        var format = _file.Format;
+        int cur    = page;
+
+        for (int depth = 0; depth < MaxTreeDepth; depth++)
+        {
+            byte[] p = _file.ReadPage(cur);
+            if (p[0] == JetFormat.PageTypeIndexLeaf)
+            {
+                var leafEntries = ReadEntries(p, format, isLeaf: true);
+                if (leafEntries.Count == 0)
+                    throw new InvalidOperationException(
+                        $"Leaf p{cur} holds no entries, so it has no greatest key.");
+                return (leafEntries[^1].KeyBytes, leafEntries[^1].RowPtr);
+            }
+
+            int tail = ByteUtil.GetInt(p, format.OffsetChildTailIndexPage);
+            if (tail > 0 && tail != NoPage) { cur = tail; continue; }
+
+            var nodeEntries = ReadEntries(p, format, isLeaf: false);
+            if (nodeEntries.Count == 0)
+                throw new InvalidOperationException($"Node p{cur} has neither entries nor a child tail.");
+            cur = nodeEntries[^1].SubPage;
+        }
+
+        throw new InvalidOperationException(
+            $"Index tree below p{page} is deeper than {MaxTreeDepth} levels, or its pages form a cycle.");
+    }
+
+    /// <summary>
+    /// Descends to the leaf covering <paramref name="searchKey"/>, returning the nodes passed
+    /// through (root first) so an insert can propagate a split back up them.
+    /// </summary>
+    private (List<int> Nodes, int Leaf) DescendPath(int rootPage, byte[] searchKey)
+    {
+        var format = _file.Format;
+        var nodes  = new List<int>();
+        int cur    = rootPage;
+
+        for (int depth = 0; depth < MaxTreeDepth; depth++)
+        {
+            byte[] page = _file.ReadPage(cur);
+            if (page[0] != JetFormat.PageTypeIndexNode) return (nodes, cur);
+
+            nodes.Add(cur);
+            var entries = ReadEntries(page, format, isLeaf: false);
+
+            int target = -1;
+            foreach (var e in entries)
+                if (CompareBytes(e.KeyBytes, searchKey) >= 0) { target = e.SubPage; break; }
+
+            if (target < 0)
+            {
+                int tail = ByteUtil.GetInt(page, format.OffsetChildTailIndexPage);
+                target = tail > 0 && tail != NoPage
+                    ? tail
+                    : entries[^1].SubPage;   // older trees we wrote have no tail pointer
+            }
+            cur = target;
+        }
+
+        throw new InvalidOperationException(
+            $"Index tree at p{rootPage} is deeper than {MaxTreeDepth} levels, or its pages form a cycle.");
     }
 
     /// <summary>

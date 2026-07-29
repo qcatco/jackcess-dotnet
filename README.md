@@ -168,9 +168,10 @@ Access is concerned even though a page scan still returns it. Every index of the
 takes an entry, each index's entry count is kept current (Access answers `COUNT(*)` and
 `MAX` from an index), and a full leaf splits correctly — including in a tree Access
 wrote, which needs the new root recorded against the right index-data block rather than
-the right *slot*; the two are ordered independently. Two cases still throw rather than
-risk an index: a page Access prefix-compressed, and a split needing a third level.
-`Table.ForceIgnoreIndexCheck` inserts anyway and leaves that index short.
+the right *slot*; the two are ordered independently. Pages Access prefix-compressed are
+expanded and re-emitted in full, and a full node splits under a new level, so trees grow
+past two levels — all three verified by querying the result through ACE.
+`Table.ForceIgnoreIndexCheck` is kept as public API but now has nothing left to suppress.
 
 ⁵ `db.CreateIndex("People", "ByName", "Name")` — up to 10 ascending columns, spliced into
 the table's existing definition and then filled from the rows already stored, so it

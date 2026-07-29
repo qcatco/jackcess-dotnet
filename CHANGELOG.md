@@ -55,16 +55,30 @@ files the ACE engine wrote and querying the results back through
   `MSysComplexColumns` maps the column to its flat table, and the returned rows are that
   table's, so the shape follows the kind of complex column.
 - **`Index.IndexDataNumber`** — which index-data block in the TDEF holds an index's tree.
-- **`Table.ForceIgnoreIndexCheck`** and **`ImportOptions.ForceIgnoreIndexCheck`** — opt out
-  of the refusal below and keep inserting, leaving that index without the new entries.
-  Access may then under-report rows for queries that use it.
+- **`Table.ForceIgnoreIndexCheck`** and **`ImportOptions.ForceIgnoreIndexCheck`** — opt out of
+  the index-maintenance refusal and keep inserting, leaving that index without the new entries.
+  Added mid-release, and by the end of it there is nothing left for it to suppress (see Changed).
 
 ### Changed
 
-- **A leaf split is no longer refused.** It is written in Access's own shape, in a tree this
-  library grew and in one Access wrote. What still throws is narrower: a page Access
-  *prefix-compressed*, and a split that would need a third level (its new parent entry does
-  not fit in the root node — splitting a node is not written yet).
+- **Nothing about growing an index is refused any more.** Three cases used to throw rather than
+  risk an index, and all three are now written and verified against the ACE engine:
+  - **a leaf split**, in a tree this library grew and in one Access wrote;
+  - **a page Access prefix-compressed** — the shared prefix is put back and the page re-emitted in
+    full with a zeroed prefix count. This was refused on a measurement taken while the index-block
+    bug above was cross-wiring roots; with that fixed, inserting keys *interleaved* among 400
+    existing ones across four compressed leaves left every old and new key seekable through ACE.
+    (Keys appended above the existing range prove nothing here — they all land on the one
+    uncompressed tail leaf without expanding a prefix.)
+  - **a full node**, which now splits in two under a new level, so a tree grows past two levels.
+    A node covers children `c0..cn` as an entry each except the last plus a child-tail pointer;
+    splitting at entry `m` keeps `c0..cm` (with `cm` as the new tail) and moves `c(m+1)..cn` to a
+    new page, entry `m` becoming the separator the parent records. Insertion records the nodes it
+    descends through and walks a split back up them, so any depth is handled.
+
+  `Table.ForceIgnoreIndexCheck` therefore no longer changes what happens to any index this library
+  can reach; it is kept as public API, and the only case left to refuse is a key too large to share
+  a page with another, which Jet's 255-byte key limit puts out of reach.
 - **Breaking:** `IndexWriter.InsertIntoIndex`, `WouldExceedIndexCapacity` and
   `IncrementIndexRowCount` take an `Index` rather than an `int` ordinal, so a slot position
   can no longer be passed where a block number belongs. `IncrementIndexRowCountForDataBlock`

@@ -134,13 +134,19 @@ public sealed class Table
 
     /// <summary>
     /// When <c>false</c> (the default) an insert that cannot keep one of the table's indexes
-    /// correct throws, and neither the row nor the index is written.
+    /// correct throws, and neither the row nor the index is written. Set it to <c>true</c> to
+    /// insert anyway, leaving that index without an entry for the new row.
     /// <para>
-    /// Set it to <c>true</c> to insert anyway, leaving that index without an entry for the new
-    /// row. Nothing is corrupted, but Access reads through indexes — it will answer
-    /// <c>COUNT(*)</c> from the primary key rather than scanning — so it can under-report rows
-    /// that are physically present. Use it when you know the consumer scans, or when a
-    /// slightly stale index is preferable to a failed run.
+    /// It has almost nothing left to affect: leaf splits, pages Access prefix-compressed, and full
+    /// nodes are all written correctly now, so the refusal it overrides no longer fires for any
+    /// index this library can reach — only for a key too large to share a page with any other,
+    /// which Jet's 255-byte key limit puts out of reach. It is kept because callers set it and
+    /// because a future unsupported case should have somewhere to opt out.
+    /// </para>
+    /// <para>
+    /// When it does suppress an entry, nothing is corrupted, but Access reads through indexes — it
+    /// will answer <c>COUNT(*)</c> from the primary key rather than scanning — so it can
+    /// under-report rows that are physically present.
     /// </para>
     /// </summary>
     public bool ForceIgnoreIndexCheck { get; set; }
@@ -168,15 +174,14 @@ public sealed class Table
 
             if (!ForceIgnoreIndexCheck)
                 throw new NotSupportedException(
-                    $"Index '{ix.Name}' on '{Name}' cannot take an entry for this row. Either the " +
-                    "page it belongs on was prefix-compressed by Access, which this writer cannot " +
-                    "re-emit, or the index is full at two levels and would need its root node " +
-                    "split — neither is written yet. This row was not written and no index was " +
-                    "modified, so the file stays valid; rows inserted earlier in the same batch " +
-                    "remain. Set Table.ForceIgnoreIndexCheck (or ImportOptions.ForceIgnoreIndexCheck) " +
-                    $"to true to keep inserting and leave '{ix.Name}' without entries from this " +
-                    "point on; Access may then under-report rows for queries that use it. Ordinary " +
-                    "leaf splits need none of this — they are written correctly.");
+                    $"Index '{ix.Name}' on '{Name}' is full at two levels, and this row would " +
+                    "need its root node split to grow a third — that is not written yet. This row " +
+                    "was not written and no index was modified, so the file stays valid; rows " +
+                    "inserted earlier in the same batch remain. Set Table.ForceIgnoreIndexCheck (or " +
+                    $"ImportOptions.ForceIgnoreIndexCheck) to true to keep inserting and leave " +
+                    $"'{ix.Name}' without entries from this point on; Access may then under-report " +
+                    "rows for queries that use it. Leaf splits and pages Access prefix-compressed " +
+                    "need none of this — both are written correctly.");
 
             skip.Add(i);
         }
