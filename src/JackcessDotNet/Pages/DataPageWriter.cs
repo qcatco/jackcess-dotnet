@@ -103,7 +103,16 @@ public sealed class DataPageWriter
 
             if (dp[0] == JetFormat.PageTypeData)
             {
-                short freeSpace = ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace);
+                int freeSpace = ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace);
+
+                // Short on room, but deleted rows may be holding some. Closing their gaps costs a
+                // page rewrite, so it is only worth doing when the page is about to be given up on.
+                if (freeSpace < needed)
+                {
+                    int reclaimed = CompactPage(pageNum);
+                    if (reclaimed >= 0) freeSpace = reclaimed;
+                }
+
                 if (freeSpace >= needed)
                 {
                     if (umapChanged) _file.WritePage(tableDef.UmapPageNumber, umapPage);
@@ -143,6 +152,96 @@ public sealed class DataPageWriter
         _file.WritePage(tableDef.UmapPageNumber, umapPage);
 
         return allocated;
+    }
+
+    /// <summary>
+    /// Closes the gaps a page's deleted rows have left, returning how much free space it ends up
+    /// with — or -1 when there was nothing to reclaim.
+    /// <para>
+    /// Deleting a row only flags its slot. The bytes stay, and because the page's free space is the
+    /// gap between the slot table and the lowest row, they are unusable until the surviving rows
+    /// are packed back together.
+    /// </para>
+    /// <para>
+    /// <b>Slots keep their numbers.</b> An index entry points at <c>(page &lt;&lt; 16) | slot</c>,
+    /// so renumbering would leave every index in the table pointing at the wrong rows — the reason
+    /// Access reclaims this only during a compact-and-repair, where it rebuilds the indexes too.
+    /// Only the offsets inside the slots change, and each row is re-laid in slot order so that
+    /// row <c>i</c> still sits directly below row <c>i-1</c>, which is the ordering the readers
+    /// use to find where a row ends.
+    /// </para>
+    /// </summary>
+    private int CompactPage(int pageNum)
+    {
+        var    format = _file.Format;
+        byte[] page   = _file.ReadPage(pageNum);
+        if (page[0] != JetFormat.PageTypeData) return -1;
+
+        int rowCount = ByteUtil.GetShort(page, format.OffsetDataNumRows);
+        if (rowCount <= 0) return -1;
+
+        // Gather the live rows with the slots they must stay in.
+        var live = new List<(int Slot, ushort SlotVal, byte[] Bytes)>(rowCount);
+        bool anyDeleted = false;
+
+        for (int r = 0; r < rowCount; r++)
+        {
+            int    slotOff = format.OffsetDataRowTable + r * JetFormat.SizeRowEntry;
+            ushort slotVal = ByteUtil.GetUShort(page, slotOff);
+
+            if ((slotVal & 0x8000) != 0) { anyDeleted = true; continue; }
+            if ((slotVal & 0x4000) != 0) return -1;   // an overflow pointer: not ours to move
+
+            int start = slotVal & JetFormat.RowOffsetMask;
+            int end   = r == 0
+                ? format.PageSize
+                : ByteUtil.GetUShort(page, format.OffsetDataRowTable + (r - 1) * JetFormat.SizeRowEntry)
+                  & JetFormat.RowOffsetMask;
+            if (end <= start) return -1;   // not a layout this can safely rewrite
+
+            var bytes = new byte[end - start];
+            Array.Copy(page, start, bytes, 0, bytes.Length);
+            live.Add((r, slotVal, bytes));
+        }
+
+        if (!anyDeleted) return -1;
+
+        // Re-lay the survivors from the end of the page down, in slot order. A deleted slot keeps
+        // its flag and takes the cursor as its offset, so it spans zero bytes and the
+        // "row i ends where row i-1 starts" rule still holds across it.
+        int cursor = format.PageSize;
+        var offsets = new int[rowCount];
+
+        int next = 0;
+        for (int r = 0; r < rowCount; r++)
+        {
+            if (next < live.Count && live[next].Slot == r)
+            {
+                byte[] bytes = live[next].Bytes;
+                cursor -= bytes.Length;
+                Array.Copy(bytes, 0, page, cursor, bytes.Length);
+                offsets[r] = cursor;
+                next++;
+            }
+            else
+            {
+                offsets[r] = cursor;   // deleted: zero-length at the current boundary
+            }
+        }
+
+        for (int r = 0; r < rowCount; r++)
+        {
+            int    slotOff = format.OffsetDataRowTable + r * JetFormat.SizeRowEntry;
+            ushort flags   = (ushort)(ByteUtil.GetUShort(page, slotOff) & ~JetFormat.RowOffsetMask);
+            ByteUtil.PutUShort(page, slotOff, (ushort)(flags | (ushort)offsets[r]));
+        }
+
+        int freeSpace = cursor - (format.OffsetDataRowTable + rowCount * JetFormat.SizeRowEntry);
+        if (freeSpace < 0) return -1;
+
+        ByteUtil.PutShort(page, JetFormat.OffsetDataFreeSpace, (short)freeSpace);
+        _file.WritePage(pageNum, page);
+        return freeSpace;
     }
 
     /// <summary>
@@ -401,6 +500,13 @@ public sealed class DataPageWriter
         _file.WritePage(pageNum, page);
 
         ReclaimIfEmptied(table, pageNum);
+
+        // The page now holds space worth having, even though its free-space figure has not moved —
+        // the bytes are still occupied by the flagged row until something compacts them. Listing it
+        // is what gives the next insert the chance to: page selection compacts a candidate before
+        // giving up on it. Without this the page is simply never looked at again, having been
+        // evicted from the map when it filled.
+        ListAsFree(table, pageNum);
         return row;
     }
 

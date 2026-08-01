@@ -148,6 +148,7 @@ materialising the whole table.
 | Keeping indexes correct on delete / update         | ✅ Entries moved or removed, counts adjusted |
 | Creating secondary indexes                        | ✅ `Database.CreateIndex`, single or composite, ascending or descending, backfilled⁵ |
 | Unique indexes enforced on insert                  | ✅ Including primary keys; null keys exempt |
+| Reclaiming space from deleted rows                | ✅ Whole emptied pages, and gaps within pages still in use |
 | Table definitions spanning several pages          | ✅ Read and written |
 | Reading complex columns (multi-value, attachments, memo history) | ✅ `Table.GetComplexValues` |
 | Memo / OLE long values                            | ✅      |

@@ -113,9 +113,13 @@ files the ACE engine wrote and querying the results back through
   maintained instead: 4000 rows now cost about nine page reads each.
 - **Deleting and updating seek instead of scanning**, through a single-column index on the column
   when there is one, and act on the row pointer they find rather than searching again.
-- **Emptied pages are reused.** A page whose every row is deleted is reset and put back on the
-  free-space map, so a file that churns stops growing without bound. Space inside a page that still
-  holds live rows needs the page compacted, which is not done.
+- **Deleted space is reclaimed, on emptied pages and within pages still in use.** A page whose
+  every row is deleted is reset wholesale; a page that still holds live rows has their bytes packed
+  back together, which is what frees the space a flagged row was sitting on. Slots keep their
+  numbers through the move — an index entry points at `(page << 16) | slot`, so renumbering would
+  leave every index pointing at the wrong rows, which is why Access reclaims this only during a
+  compact-and-repair where it rebuilds the indexes too. Compaction happens when page selection is
+  about to give up on a candidate, so it costs a rewrite only when it saves an allocation.
 
 ### Changed
 
