@@ -55,17 +55,63 @@ public sealed class OfficeCryptCodecHandler : ICodecHandler
     private readonly Func<byte[], int, byte[]> _decryptPage;
     private readonly Func<byte[], int, byte[]> _encryptPage;
     private readonly string _schemeDescription;
+    private readonly AgileDescriptor? _agile;
+    private readonly byte[]? _agileKeyValue;
 
     private OfficeCryptCodecHandler(
         byte[] encodingKey,
         Func<byte[], int, byte[]> decryptPage,
         Func<byte[], int, byte[]> encryptPage,
-        string schemeDescription)
+        string schemeDescription,
+        AgileDescriptor? agile = null,
+        byte[]? agileKeyValue = null)
     {
         _encodingKey       = encodingKey;
         _decryptPage       = decryptPage;
         _encryptPage       = encryptPage;
         _schemeDescription = schemeDescription;
+        _agile             = agile;
+        _agileKeyValue     = agileKeyValue;
+    }
+
+    /// <summary>
+    /// Whether this file is Agile-encrypted and carries a &lt;dataIntegrity&gt; element. Only Agile
+    /// defines one; the older schemes have no equivalent.
+    /// </summary>
+    public bool HasDataIntegrity => _agile?.DataIntegrity is not null;
+
+    /// <summary>
+    /// Checks the file's stored data-integrity hash against <paramref name="content"/>.
+    /// <para>
+    /// Which bytes to pass is the caller's decision: the specification defines the hash over an
+    /// OOXML package's encrypted stream, and an Access database has no such stream, so this port
+    /// does not presume to know what an Access writer covered.
+    /// </para>
+    /// </summary>
+    /// <returns>False when there is no hash to check against, or when it does not match.</returns>
+    public bool VerifyDataIntegrity(ReadOnlySpan<byte> content)
+    {
+        if (_agile?.DataIntegrity is not { } stored || _agileKeyValue is null) return false;
+
+        return AgileDataIntegrity.Verify(
+            _agile.KeyData.HashAlgorithm, _agile.KeyData.SaltValue, _agile.KeyData.BlockSize,
+            _agileKeyValue, content, stored.EncryptedHmacKey, stored.EncryptedHmacValue);
+    }
+
+    /// <summary>
+    /// Produces a fresh data-integrity pair over <paramref name="content"/>, for a writer updating
+    /// the descriptor after changing the file.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The file is not Agile-encrypted.</exception>
+    public AgileDataIntegrity.Values ComputeDataIntegrity(ReadOnlySpan<byte> content)
+    {
+        if (_agile is null || _agileKeyValue is null)
+            throw new InvalidOperationException(
+                $"A data-integrity hash is only defined for Agile encryption; this file uses {_schemeDescription}.");
+
+        return AgileDataIntegrity.Compute(
+            _agile.KeyData.HashAlgorithm, _agile.KeyData.SaltValue, _agile.KeyData.BlockSize,
+            _agileKeyValue, content);
     }
 
     /// <summary>Short label for the active scheme — useful in error messages.</summary>
@@ -205,7 +251,9 @@ public sealed class OfficeCryptCodecHandler : ICodecHandler
             encodingKey,
             (page, pageNumber) => AgileEngine.DecryptPage(descriptor, keyValue, encodingKey, page, pageNumber),
             (page, pageNumber) => AgileEngine.EncryptPage(descriptor, keyValue, encodingKey, page, pageNumber),
-            "Agile Encryption (Office 2010+)");
+            "Agile Encryption (Office 2010+)",
+            descriptor,
+            keyValue);
     }
 
     /// <summary>
@@ -217,6 +265,19 @@ public sealed class OfficeCryptCodecHandler : ICodecHandler
     {
         public required KeyParams            KeyData     { get; init; }
         public required PasswordKeyEncryptor PasswordKey { get; init; }
+
+        /// <summary>
+        /// The &lt;dataIntegrity&gt; pair, when the file carries one. Optional in the schema, and
+        /// absent from every Agile .accdb this port has been given, so it stays nullable.
+        /// </summary>
+        public DataIntegrityValues? DataIntegrity { get; init; }
+
+        /// <summary>The two base64 ciphertexts of a &lt;dataIntegrity&gt; element.</summary>
+        public sealed class DataIntegrityValues
+        {
+            public required byte[] EncryptedHmacKey   { get; init; }
+            public required byte[] EncryptedHmacValue { get; init; }
+        }
 
         /// <summary>
         /// Master-key parameters from the &lt;keyData&gt; element of the Agile
@@ -274,8 +335,15 @@ public sealed class OfficeCryptCodecHandler : ICodecHandler
                     "Agile descriptor has no <encryptedKey> in the password-protected key encryptor — " +
                     "certificate-only encryption isn't supported.");
 
+            var integrityEl = keyDataEl.Parent?.Element(XName.Get("dataIntegrity", keyDataEl.Name.NamespaceName));
+
             return new AgileDescriptor
             {
+                DataIntegrity = integrityEl is null ? null : new AgileDescriptor.DataIntegrityValues
+                {
+                    EncryptedHmacKey   = AttrBase64(integrityEl, "encryptedHmacKey"),
+                    EncryptedHmacValue = AttrBase64(integrityEl, "encryptedHmacValue"),
+                },
                 KeyData = new KeyParams
                 {
                     SaltSize        = AttrInt   (keyDataEl, "saltSize"),

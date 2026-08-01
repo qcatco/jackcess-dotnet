@@ -153,6 +153,7 @@ materialising the whole table.
 | PropertyMap & MSysRelationships                   | ✅      |
 | Password-protected `.mdb` (Jet RC4 codec)         | ✅      |
 | Password-protected `.accdb` (Agile Encryption, Office 2010+) | ✅ Read + write¹ |
+| Agile data-integrity hash (`<dataIntegrity>`)     | ⚠️ Implemented to spec, round-trip tested only⁷ |
 | Password-protected `.accdb` (ECMA Standard Encryption, Office 2007) | ✅ Read + write |
 | Password-protected `.accdb` (RC4 CryptoAPI, Office 2002–2003) | ✅ Read + write |
 | Password-protected `.accdb` (Non-Standard AES, compat mode 0) | ✅ Read + write |
@@ -232,3 +233,13 @@ format is documented effectively only through their Java source.
 ## License
 
 [Apache License 2.0](LICENSE) — same as the upstream Jackcess project.
+
+⁷ `AgileDataIntegrity` computes and verifies the `encryptedHmacKey` / `encryptedHmacValue`
+pair of MS-OFFCRYPTO §2.3.4.14, and `OfficeCryptCodecHandler` exposes them for an
+Agile-encrypted file. It is checked against itself — tampered content, wrong key and
+swapped ciphertexts all fail, every Agile hash round-trips — but **not** against
+Microsoft's output: that needs an Agile file already carrying a `<dataIntegrity>`
+element to recompute, or real Access to open one written here, and neither the ACE nor
+the DAO engine substitutes. Which bytes the hash covers is the caller's to decide; the
+specification defines it over an OOXML package's encrypted stream, and an Access
+database has no such stream.

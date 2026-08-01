@@ -88,6 +88,15 @@ files the ACE engine wrote and querying the results back through
 - **Table definitions spanning several pages** are read and written (`TdefChain`). Only the first
   page used to be read, and a wide table's index sections fall past it — which was handled by
   reporting *no indexes at all*, so appending to such a table left every index untouched.
+- **The Agile data-integrity hash** (MS-OFFCRYPTO §2.3.4.14) — `AgileDataIntegrity` computes and
+  verifies the `encryptedHmacKey` / `encryptedHmacValue` pair, and `OfficeCryptCodecHandler`
+  exposes `HasDataIntegrity`, `VerifyDataIntegrity` and `ComputeDataIntegrity` for an
+  Agile-encrypted file. **Round-trip tested only:** tampered content, a wrong key value and swapped
+  ciphertexts all fail the check and every Agile hash algorithm round-trips, but nothing here
+  compares the result with Microsoft's, which needs a file that already carries the element or real
+  Access to open one written here. Which bytes the hash covers is left to the caller — the
+  specification defines it over an OOXML package's encrypted stream and an Access database has
+  none.
 - **`PageFile.PagesRead`** — page reads are what an operation costs, and no correctness test can
   tell a seek from a scan.
 - **Reading complex columns** — multi-value fields, attachments and append-only memo history, via
