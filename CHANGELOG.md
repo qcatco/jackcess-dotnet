@@ -173,6 +173,10 @@ files the ACE engine wrote and querying the results back through
   written there was nothing left for it to suppress. It was never in a published package, so no
   caller can be relying on it. The only refusal left is a key too large for three to share a page,
   which is what splitting a node needs; Jet's 255-byte key limit puts that out of reach.
+- **Documented that there is no 64-bit integer type.** Jet 4 stops at `Long` (Int32); `BIGINT`
+  ("Large Number", `0x13`) is ACE 16 and later, and is not implemented here, so such a column
+  cannot be read either. `DataType.Numeric` is the faithful choice for an exact `Int64` — `Money`
+  is an `Int64` of ten-thousandths and `Double` is exact only to 2^53.
 - **`Database.Create` still accepts the ACE versions**, and still writes a Jet 4 database for
   them. Partway through this release it was changed to throw instead, on the grounds that the file
   misrepresents its format — the header says `Standard Jet DB` whatever the extension. That broke

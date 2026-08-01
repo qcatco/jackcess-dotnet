@@ -163,6 +163,7 @@ materialising the whole table.
 | Password-protected `.accdb` (RC4 CryptoAPI, Office 2002–2003) | ✅ Read + write |
 | Password-protected `.accdb` (Non-Standard AES, compat mode 0) | ✅ Read + write |
 | Password-protected `.accdb` (Extensible Encryption) | ❌ External CSP — non-portable |
+| 64-bit integers (`BIGINT` / "Large Number")       | ❌ Not a Jet 4 type at all; ACE's is unimplemented¹⁰ |
 | Multi-column primary keys                         | ✅      |
 | Foreign-key enforcement on insert (opt-in)        | ✅ Restrict-only |
 | Queries (`MSysQueries`)                           | ❌ Not yet |
@@ -264,3 +265,15 @@ own header, system tables and page structures, is not written. It is still usefu
 the ACE engine open a Jet 4 file regardless of extension, so a caller that creates one, fills
 it and hands it on gets a file that works. Reading a real `.accdb` is genuine ACE and
 unaffected.
+
+¹⁰ Jet 4's integer types stop at `Long` (Int32). Its only 8-byte types are `Money`,
+`Double` and `ShortDateTime`, and none is a general 64-bit integer. `BIGINT` — Access's
+"Large Number", data type `0x13` — arrived with ACE 16 (Access 2016) and only when that
+option is enabled; this library does not implement it, so a column using it cannot be read
+either.
+
+For an exact 64-bit value in a Jet 4 file, use `DataType.Numeric` (`0x10`): a 17-byte
+decimal with up to 28 digits of precision, which holds any `Int64` exactly. The
+alternatives all lose something — `Money` is internally an `Int64` of ten-thousandths, so
+it caps at ±922,337,203,685,477.5807 and carries currency semantics; `Double` is exact only
+to 2^53, and silently wrong above it.
