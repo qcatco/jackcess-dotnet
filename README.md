@@ -138,7 +138,8 @@ materialising the whole table.
 | ------------------------------------------------- | ------ |
 | Read Jet 3 (Access 97) / Jet 4 (Access 2000–2003) | ✅      |
 | Read ACE 12 / 14 / 16 / 17 (`.accdb`)             | ✅      |
-| Create new `.mdb` files (Jet 4 / Jet 3)           | ✅      |
+| Create new `.mdb` files (Jet 4)                   | ✅      |
+| Create new `.mdb` files (Jet 3, Access 97)        | ❌ `CreateTable` throws — Jet 3 column headers are 18 bytes with a different layout |
 | Create new `.accdb` files (ACE format)            | ❌ Refused — reading `.accdb` is fully supported |
 | Row CRUD + B-tree indexes (single-column PK)      | ✅      |
 | **Files and tables Microsoft Access can open**    | ✅ Both paths verified against the ACE engine³ |
