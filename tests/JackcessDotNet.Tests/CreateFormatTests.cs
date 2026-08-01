@@ -30,20 +30,43 @@ public sealed class CreateFormatTests : IDisposable
         return path;
     }
 
+    /// <summary>
+    /// Asking for an ACE version produces a usable database — a Jet 4 one, which Access and the ACE
+    /// engine open whatever the extension. A version of this library refused instead, because the
+    /// file's header does not match its name; that broke callers who were creating an .accdb,
+    /// filling it and handing it on, and it broke them to fix a labelling complaint. The header is
+    /// asserted below so the substitution stays visible rather than becoming folklore.
+    /// </summary>
     [Theory]
     [InlineData(JetVersion.Jet12)]
     [InlineData(JetVersion.Jet14)]
     [InlineData(JetVersion.Jet16)]
     [InlineData(JetVersion.Jet17)]
-    public void CreatingAnAceDatabase_IsRefusedRatherThanWrittenAsJet4(JetVersion version)
+    public void CreatingAnAceDatabase_ProducesAUsableJet4Database(JetVersion version)
     {
         string path = TempPath(".accdb");
 
-        var ex = Assert.Throws<NotSupportedException>(() => Database.Create(path, version));
+        using (var db = Database.Create(path, version))
+        {
+            var t = db.CreateTable("T", new[]
+            {
+                new ColumnBuilder("Id",   DataType.Long).Build(),
+                new ColumnBuilder("Name", DataType.Text).MaxLength(50).Build(),
+            }, primaryKey: "Id");
+            for (int i = 0; i < 20; i++) t.Insert(new Row { ["Id"] = i, ["Name"] = $"n{i:D3}" });
+        }
 
-        Assert.Contains(version.ToString(), ex.Message);
-        Assert.Contains("Jet4", ex.Message);
-        Assert.False(File.Exists(path), "a refused create must not leave a file behind");
+        using (var db = Database.Open(path))
+        {
+            var t = db.GetTable("T");
+            Assert.Equal(20, t.ReadAllRows().Count);
+            Assert.NotNull(t.NewIndexCursor("PrimaryKey").FindRowByPrimaryKey(7));
+        }
+
+        // What it really is: Jet 4, whatever the extension says.
+        byte[] head = File.ReadAllBytes(path).Take(0x15).ToArray();
+        Assert.Equal("Standard Jet DB", Encoding.ASCII.GetString(head, 4, 15));
+        Assert.Equal(0x01, head[0x14]);
     }
 
     [Fact]

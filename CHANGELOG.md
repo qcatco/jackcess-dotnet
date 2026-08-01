@@ -173,6 +173,12 @@ files the ACE engine wrote and querying the results back through
   written there was nothing left for it to suppress. It was never in a published package, so no
   caller can be relying on it. The only refusal left is a key too large for three to share a page,
   which is what splitting a node needs; Jet's 255-byte key limit puts that out of reach.
+- **`Database.Create` still accepts the ACE versions**, and still writes a Jet 4 database for
+  them. Partway through this release it was changed to throw instead, on the grounds that the file
+  misrepresents its format — the header says `Standard Jet DB` whatever the extension. That broke
+  callers who create an `.accdb`, fill it and hand it on, which works because Access and the ACE
+  engine open Jet 4 regardless of extension. The substitution is documented on `JetVersion`, in the
+  README and by a test that asserts the header, rather than enforced by a refusal.
 - **Breaking:** `IndexWriter.InsertIntoIndex`, `WouldExceedIndexCapacity` and
   `IncrementIndexRowCount` take an `Index` rather than an `int` ordinal, so a slot position
   can no longer be passed where a block number belongs. `IncrementIndexRowCountForDataBlock`

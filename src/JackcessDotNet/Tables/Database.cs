@@ -55,18 +55,16 @@ public sealed class Database : IDisposable
     /// </summary>
     public static Database Create(string path, JetVersion version)
     {
-        // Every version used to fall through to Jet 4 here, so Create(…, Jet16) wrote a file whose
-        // header said "Standard Jet DB" version 0x01 — a Jet 4 database with an .accdb name. That
-        // reads back through this library and through the ACE engine, since ACE opens Jet 4
-        // whatever the extension, so it looked supported while nothing about it was ACE format.
-        // Writing ACE means a different header, its own system tables and its own page structures;
-        // until that exists, say so rather than hand back a file that misrepresents itself.
-        if (version is not (JetVersion.Jet3 or JetVersion.Jet4))
-            throw new NotSupportedException(
-                $"Creating a {version} (.accdb / ACE format) database is not supported — only Jet3 " +
-                "and Jet4 (.mdb) can be written. Reading ACE files is fully supported, so an " +
-                "existing .accdb can be opened and appended to; a new database has to be Jet4.");
-
+        // Jet12 and later ask for ACE format, and what comes out is a Jet 4 database — the header
+        // reads "Standard Jet DB" version 0x01 whatever the file is called. Writing true ACE means
+        // a different header, its own system tables and its own page structures, none of which
+        // exists here.
+        //
+        // It is still worth producing. The ACE engine and Access open a Jet 4 file whatever its
+        // extension, so a caller that creates one, fills it and hands it on gets a file that works
+        // everywhere it matters. A version of this library briefly refused instead, on the grounds
+        // that the file misrepresented its format — which broke callers doing exactly that, to fix
+        // a labelling complaint. Documented beats refused; see JetVersion and the README.
         var format = version == JetVersion.Jet3 ? JetFormat.Jet3 : JetFormat.Jet4;
         var file   = new PageFile(path, format, FileMode.Create);
         var db     = new Database(file);

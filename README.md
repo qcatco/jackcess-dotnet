@@ -140,7 +140,7 @@ materialising the whole table.
 | Read ACE 12 / 14 / 16 / 17 (`.accdb`)             | ✅      |
 | Create new `.mdb` files (Jet 4)                   | ✅      |
 | Create new `.mdb` files (Jet 3, Access 97)        | ❌ `CreateTable` throws — Jet 3 column headers are 18 bytes with a different layout |
-| Create new `.accdb` files (ACE format)            | ❌ Refused — reading `.accdb` is fully supported |
+| Create new `.accdb` files (ACE format)            | ⚠️ Produces a Jet 4 database, which Access opens⁹ |
 | Row CRUD + B-tree indexes (single-column PK)      | ✅      |
 | **Files and tables Microsoft Access can open**    | ✅ Both paths verified against the ACE engine³ |
 | Appending into large existing files               | ✅ Inline usage-map window slides, then promotes to a reference map² |
@@ -257,3 +257,10 @@ now right — Access and this library agree on the table's row count, which they
 the long-value map's *row* was honoured — so what remains is the chain's own content. Note that
 every other write path here is exercised against Jet 4 `.mdb` — that gap is how the encoder
 came to disagree with the reader about where a value lives.
+
+⁹ `Database.Create(path, JetVersion.Jet12…Jet17)` writes a **Jet 4** database — the header
+reads `Standard Jet DB` version `0x01` whatever the file is called. True ACE format, with its
+own header, system tables and page structures, is not written. It is still useful: Access and
+the ACE engine open a Jet 4 file regardless of extension, so a caller that creates one, fills
+it and hands it on gets a file that works. Reading a real `.accdb` is genuine ACE and
+unaffected.

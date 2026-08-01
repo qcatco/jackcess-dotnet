@@ -10,7 +10,14 @@ public enum JetVersion
     Jet3,
     /// <summary>Jet 4 — Access 2000/2002/2003 (.mdb, page size 4096).</summary>
     Jet4,
-    /// <summary>ACE 12 — Access 2007 (.accdb, page size 4096). Unencrypted only today.</summary>
+    /// <summary>
+    /// ACE 12 — Access 2007 (.accdb, page size 4096). Unencrypted only today.
+    /// <para>
+    /// Reading is genuine ACE. <see cref="Database.Create"/> writes a <b>Jet 4</b> database for this
+    /// and every later member — the format itself is not written yet — which Access and the ACE
+    /// engine open regardless of the file's extension.
+    /// </para>
+    /// </summary>
     Jet12,
     /// <summary>ACE 14 — Access 2010 (.accdb).</summary>
     Jet14,
