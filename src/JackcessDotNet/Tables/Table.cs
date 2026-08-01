@@ -196,6 +196,102 @@ public sealed class Table
         return written;
     }
 
+    /// <summary>
+    /// Removes one value from a complex column — a single multi-value entry, one attachment, one
+    /// memo revision — leaving the row's other values in place.
+    /// </summary>
+    /// <param name="value">
+    /// A row as handed back by <see cref="GetComplexValues"/> or <see cref="AddComplexValue"/>. It
+    /// is identified by the flat table's own id, which is unique across that table, so the caller
+    /// does not have to describe the value by its contents.
+    /// </param>
+    /// <returns>True when a value was found and removed.</returns>
+    public bool RemoveComplexValue(Row row, string columnName, Row value)
+    {
+        var (flat, _, ownId, id) = ResolveComplexValue(row, columnName, value);
+
+        // DeleteRow keeps the flat table's own indexes in step, which matters as much here as
+        // anywhere: Access reaches these rows through them.
+        flat.DeleteRow(ownId.Name, id);
+        return true;
+    }
+
+    /// <summary>
+    /// Replaces the contents of one value of a complex column, keeping its identity — the flat
+    /// row's own id and its link back to the owning row both survive, so the value stays the same
+    /// value rather than becoming a new one.
+    /// </summary>
+    /// <param name="newValues">
+    /// The fields to change. Anything not named keeps what it had, matching how
+    /// <see cref="UpdateByPrimaryKey"/> treats a row.
+    /// </param>
+    /// <returns>The value as it now stands.</returns>
+    public Row UpdateComplexValue(Row row, string columnName, Row value, Row newValues)
+    {
+        if (newValues is null) throw new ArgumentNullException(nameof(newValues));
+
+        var (flat, backRef, ownId, id) = ResolveComplexValue(row, columnName, value);
+
+        Row current = flat.ReadAllRows().FirstOrDefault(
+                          r => r.TryGetValue(ownId.Name, out object? v) && v is int i && i == id)
+            ?? throw new InvalidOperationException(
+                $"The value with id {id} is no longer in the flat table for '{columnName}'.");
+
+        var merged = new Row();
+        foreach (var kvp in current)   merged[kvp.Key] = kvp.Value;
+        foreach (var kvp in newValues) merged[kvp.Key] = kvp.Value;
+
+        // Identity is not the caller's to change: the link back to the owning row and the value's
+        // own id are restored whatever newValues said, so an update cannot silently re-home a value.
+        merged[backRef.Name] = current[backRef.Name];
+        merged[ownId.Name]   = id;
+
+        flat.DeleteRow(ownId.Name, id);
+        flat.Insert(merged);
+        return merged;
+    }
+
+    /// <summary>
+    /// Shared resolution for the two operations above: the flat table behind a complex column, its
+    /// two link columns, and the id of the value being addressed.
+    /// </summary>
+    private (Table Flat, Column BackRef, Column OwnId, int Id) ResolveComplexValue(
+        Row row, string columnName, Row value)
+    {
+        if (row is null)        throw new ArgumentNullException(nameof(row));
+        if (columnName is null) throw new ArgumentNullException(nameof(columnName));
+        if (value is null)      throw new ArgumentNullException(nameof(value));
+
+        var column = _definition.Columns.FirstOrDefault(
+            c => c.Name.Equals(columnName, StringComparison.OrdinalIgnoreCase));
+        if (column is null || column.DataType != DataType.Complex)
+            throw new InvalidOperationException(
+                $"Column '{columnName}' on '{Name}' is not a complex column.");
+
+        if (_owningDb is null)
+            throw new InvalidOperationException("This table is not attached to a database.");
+
+        var flat = ComplexColumns.ResolveFlatTable(_owningDb, _definition.TdefPageNumber, column.Name)
+            ?? throw new InvalidOperationException(
+                $"No flat table is registered for complex column '{columnName}' on '{Name}'.");
+
+        var backRef = ComplexColumns.FindBackReference(flat, Name, column.Name)
+            ?? throw new InvalidOperationException(
+                $"The flat table for '{columnName}' has no column linking back to '{Name}'.");
+
+        var ownId = ComplexColumns.FindOwnId(flat, Name, column.Name, backRef)
+            ?? throw new InvalidOperationException(
+                $"The flat table for '{columnName}' has no id column, so a single value cannot be " +
+                "addressed. Values there can only be added.");
+
+        if (!value.TryGetValue(ownId.Name, out object? idValue) || idValue is not int id)
+            throw new InvalidOperationException(
+                $"The value has no '{ownId.Name}', so it did not come from GetComplexValues or " +
+                "AddComplexValue and cannot be matched to a stored one.");
+
+        return (flat, backRef, ownId, id);
+    }
+
     private static int NextComplexOwnId(Table flat, Column ownId)
     {
         int highest = 0;

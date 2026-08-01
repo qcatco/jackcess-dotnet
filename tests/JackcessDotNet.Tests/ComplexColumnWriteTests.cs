@@ -196,4 +196,112 @@ public sealed class ComplexColumnWriteTests : IDisposable
 
         Assert.Equal(memo, written["memo-data"]);
     }
+
+    // ── Removing and updating an individual value ─────────────────────────────
+
+    [Fact]
+    public void OneValueCanBeRemovedLeavingTheOthers()
+    {
+        if (!TryStage()) return;
+
+        using (var db = Database.Open(_path))
+        {
+            var t = db.GetTable("Table1");
+            var row2 = RowWithId(t, "row2");
+            Row first = t.GetComplexValues(row2, "multi-value-data")
+                         .Single(v => (string)v["Value"]! == "value1");
+            Assert.True(t.RemoveComplexValue(row2, "multi-value-data", first));
+        }
+
+        using var reopened = Database.Open(_path);
+        var table = reopened.GetTable("Table1");
+
+        Assert.Equal(
+            new[] { "value4" },
+            table.GetComplexValues(RowWithId(table, "row2"), "multi-value-data")
+                 .Select(v => (string)v["Value"]!));
+
+        // Another row's values are keyed by their own link and must be untouched.
+        Assert.Equal(4, table.GetComplexValues(RowWithId(table, "row3"), "multi-value-data").Count);
+    }
+
+    [Fact]
+    public void OneValueCanBeUpdatedInPlace()
+    {
+        if (!TryStage()) return;
+
+        using (var db = Database.Open(_path))
+        {
+            var t = db.GetTable("Table1");
+            var row2 = RowWithId(t, "row2");
+            Row first = t.GetComplexValues(row2, "multi-value-data")
+                         .Single(v => (string)v["Value"]! == "value1");
+            t.UpdateComplexValue(row2, "multi-value-data", first, new Row { ["Value"] = "value1-edited" });
+        }
+
+        using var reopened = Database.Open(_path);
+        var table = reopened.GetTable("Table1");
+
+        var values = table.GetComplexValues(RowWithId(table, "row2"), "multi-value-data")
+                          .Select(v => (string)v["Value"]!)
+                          .OrderBy(v => v)
+                          .ToList();
+
+        Assert.Equal(new[] { "value1-edited", "value4" }, values);
+    }
+
+    /// <summary>An update keeps the value's identity — same id, same owner — not just its contents.</summary>
+    [Fact]
+    public void AnUpdateKeepsTheValuesIdentity()
+    {
+        if (!TryStage()) return;
+
+        using var db = Database.Open(_path);
+        var t = db.GetTable("Table1");
+        var row2 = RowWithId(t, "row2");
+
+        Row before = t.GetComplexValues(row2, "multi-value-data")
+                      .Single(v => (string)v["Value"]! == "value1");
+        int id = (int)before["Table1_multi-value-data"]!;
+
+        Row after = t.UpdateComplexValue(row2, "multi-value-data", before,
+                                         new Row { ["Value"] = "edited" });
+
+        Assert.Equal(id, (int)after["Table1_multi-value-data"]!);
+        Assert.Equal(before["_multi-value-data"], after["_multi-value-data"]);
+    }
+
+    /// <summary>Identity is not the caller's to reassign through the values they pass.</summary>
+    [Fact]
+    public void AnUpdateCannotReHomeAValueToAnotherRow()
+    {
+        if (!TryStage()) return;
+
+        using var db = Database.Open(_path);
+        var t = db.GetTable("Table1");
+        var row2 = RowWithId(t, "row2");
+
+        Row before = t.GetComplexValues(row2, "multi-value-data")
+                      .Single(v => (string)v["Value"]! == "value1");
+
+        Row after = t.UpdateComplexValue(row2, "multi-value-data", before,
+                                         new Row { ["Value"] = "x", ["_multi-value-data"] = 3 });
+
+        Assert.Equal(before["_multi-value-data"], after["_multi-value-data"]);
+        Assert.Equal(2, t.GetComplexValues(RowWithId(t, "row2"), "multi-value-data").Count);
+    }
+
+    [Fact]
+    public void RemovingAValueThatDidNotComeFromThisTable_SaysSo()
+    {
+        if (!TryStage()) return;
+
+        using var db = Database.Open(_path);
+        var t = db.GetTable("Table1");
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => t.RemoveComplexValue(RowWithId(t, "row2"), "multi-value-data",
+                                       new Row { ["Value"] = "not from here" }));
+        Assert.Contains("GetComplexValues", ex.Message);
+    }
 }

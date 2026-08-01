@@ -116,6 +116,11 @@ files the ACE engine wrote and querying the results back through
   Access to open one written here. Which bytes the hash covers is left to the caller — the
   specification defines it over an OOXML package's encrypted stream and an Access database has
   none.
+- **`Table.RemoveComplexValue` and `Table.UpdateComplexValue`** — take out or edit a single value of
+  a complex column, leaving the row's others alone. A value is addressed by the flat table's own id,
+  so callers pass back a row from `GetComplexValues` rather than describing it by contents. An update
+  keeps the value's identity: its id and its link to the owning row are restored whatever the new
+  values say, so it cannot silently be re-homed to another row.
 - **`Table.AddComplexValue`** — appends one value to a complex column, filling both link columns:
   the foreign key back to the owning row and the flat row's own sequential id, which Access numbers
   across the whole flat table rather than per owning row. Works for multi-value fields and

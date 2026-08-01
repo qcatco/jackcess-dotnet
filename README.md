@@ -151,7 +151,7 @@ materialising the whole table.
 | Reclaiming space from deleted rows                | ✅ Whole emptied pages, and gaps within pages still in use |
 | Table definitions spanning several pages          | ✅ Read and written |
 | Reading complex columns (multi-value, attachments, memo history) | ✅ `Table.GetComplexValues` |
-| Writing complex columns                           | ✅ `Table.AddComplexValue` — multi-value and attachments |
+| Writing complex columns                           | ✅ Add, update and remove individual values |
 | Writing rows into an existing `.accdb`            | ✅ ⁸ |
 | Writing a Memo / OLE value into an `.accdb`       | ⚠️ Completes and round-trips here; Access reads it empty⁸ |
 | Memo / OLE long values                            | ✅      |
