@@ -139,13 +139,17 @@ materialising the whole table.
 | Read Jet 3 (Access 97) / Jet 4 (Access 2000–2003) | ✅      |
 | Read ACE 12 / 14 / 16 / 17 (`.accdb`)             | ✅      |
 | Create new `.mdb` files (Jet 4 / Jet 3)           | ✅      |
+| Create new `.accdb` files (ACE format)            | ❌ Refused — reading `.accdb` is fully supported |
 | Row CRUD + B-tree indexes (single-column PK)      | ✅      |
 | **Files and tables Microsoft Access can open**    | ✅ Both paths verified against the ACE engine³ |
 | Appending into large existing files               | ✅ Inline usage-map window slides, then promotes to a reference map² |
 | Maintaining *every* index of a table on insert    | ✅ Including leaf splits in trees Access wrote⁴ |
 | Keeping indexes correct on delete / update         | ✅ Entries moved or removed, counts adjusted |
-| Creating secondary indexes                        | ✅ `Database.CreateIndex`, single or composite, backfilled⁵ |
-| Reading complex columns (multi-value, attachment, memo history) | ✅ `Table.GetComplexValues` |
+| Creating secondary indexes                        | ✅ `Database.CreateIndex`, single or composite, ascending or descending, backfilled⁵ |
+| Unique indexes enforced on insert                  | ✅ Including primary keys; null keys exempt |
+| Table definitions spanning several pages          | ✅ Read and written |
+| Reading complex columns (multi-value, memo history) | ✅ `Table.GetComplexValues` |
+| Reading complex columns (attachments)             | ❌ Flat-table rows decode with most columns null⁶ |
 | Memo / OLE long values                            | ✅      |
 | PropertyMap & MSysRelationships                   | ✅      |
 | Password-protected `.mdb` (Jet RC4 codec)         | ✅      |
@@ -175,12 +179,17 @@ past two levels — all three verified by querying the result through ACE. An in
 refused only when a key is too large for three to share a page, which is what splitting
 a node needs, and Jet's 255-byte key limit puts that out of reach.
 
-⁵ `db.CreateIndex("People", "ByName", "Name")` — up to 10 ascending columns, spliced into
+⁶ Not an attachment-specific fault: rows of a table mixing several fixed columns with OLE and
+Memo decode with most columns null, which `MSysResources`'s flat table shows too. The attachment
+reader is blocked behind it.
+
+⁵ `db.CreateIndex("People", "ByName", "Name")` — up to 10 columns, ascending by default or
+descending via `IndexColumnSpec`, spliced into
 the table's existing definition and then filled from the rows already stored, so it
 answers queries immediately. Access lists it (verified through ADOX) and uses it for
 seeks, `ORDER BY`, `GROUP BY` and `MAX`. Two caveats: the definition has to still fit on
-one page (a wide table can leave no room), and `unique: true` is recorded for Access's
-benefit but is **not** enforced by this library's own inserts.
+one page, and a definition that outgrows it continues on another. `unique: true` is
+enforced on insert.
 
 ² A table's data pages are tracked in a usage map whose inline bitmap addresses a
 fixed window — as little as 512 pages (~2 MB) in Access-authored files. The window

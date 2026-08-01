@@ -40,17 +40,20 @@
       history; this short blurb tells consumers what's new in *this* release.
     -->
     <PackageReleaseNotes>
-      3.0.0 — Appending to a table Access already indexed now keeps every one of its
-      indexes correct. Rows are threaded into all of a table's indexes rather than
-      only the primary key, each index's entry count is maintained (Access answers
-      COUNT(*) and MAX from an index, and a zero count made it fail them), and an
-      index leaf now splits correctly even in a tree Access wrote — previously the
-      new root was recorded against the wrong index, because Access does not order a
-      TDEF's index-data blocks to match its index slots. New: creating secondary
-      indexes (Database.CreateIndex, single or composite, filled from the rows
-      already stored) and reading complex columns (multi-value, attachment,
-      append-only memo). Breaking: IndexWriter's per-index methods take an Index
-      rather than an ordinal. See CHANGELOG.md.
+      3.0.0 — Index maintenance is now complete and appending is no longer quadratic.
+      Rows are threaded into every index rather than only the primary key, entry
+      counts are kept current (Access answers COUNT(*) and MAX from an index),
+      delete and update move or remove entries instead of leaving them behind, and
+      leaves, prefix-compressed pages and full nodes all split correctly — including
+      in trees Access wrote, where the new root used to be recorded against the wrong
+      index because Access does not order a TDEF's index-data blocks to match its
+      slots. New: creating secondary indexes (ascending or descending, single or
+      composite, backfilled), uniqueness enforced on insert, definitions spanning
+      several pages, and reading multi-value and memo-history complex columns.
+      Inserting now uses the table's free-space map instead of reading every page it
+      owns. Breaking: IndexWriter's per-index methods take an Index rather than an
+      ordinal, and Database.Create refuses .accdb rather than writing Jet 4 under an
+      ACE name. See CHANGELOG.md.
     </PackageReleaseNotes>
   </PropertyGroup>
 

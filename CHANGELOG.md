@@ -67,11 +67,39 @@ files the ACE engine wrote and querying the results back through
   is worse than no index. Access lists the result through ADOX and uses it for seeks, `ORDER BY`,
   `GROUP BY` and `MAX`. Two limits: the definition must still fit on one page, and `unique` is
   recorded for Access's benefit but not enforced by this library's inserts.
-- **Reading complex columns** — multi-value fields, attachment fields and append-only memo
-  history, via `Table.GetComplexValues(row, columnName)`. The row stores a 4-byte id;
-  `MSysComplexColumns` maps the column to its flat table, and the returned rows are that
-  table's, so the shape follows the kind of complex column.
+- **Creating indexes with descending columns** — `Database.CreateIndex` takes `IndexColumnSpec`
+  (a column name plus a direction, implicitly convertible from a plain string, so existing calls
+  are unchanged). Jet stores a descending column's key bytes inverted and clears the ascending bit
+  in its flag byte; the writer only ever emitted the ascending form, so such an index could not be
+  made. ADOX confirms Access reads the direction back.
+- **Uniqueness enforced on insert** for every unique index, primary keys included. The promise was
+  recorded and never checked, so a duplicate produced a file Access considers corrupt. A key with a
+  null component is exempt, following SQL rather than Access.
+- **Table definitions spanning several pages** are read and written (`TdefChain`). Only the first
+  page used to be read, and a wide table's index sections fall past it — which was handled by
+  reporting *no indexes at all*, so appending to such a table left every index untouched.
+- **`PageFile.PagesRead`** — page reads are what an operation costs, and no correctness test can
+  tell a seek from a scan.
+- **Reading complex columns** — multi-value fields and append-only memo history, via
+  `Table.GetComplexValues(row, columnName)`. The row stores a 4-byte id; `MSysComplexColumns` maps
+  the column to its flat table, and the returned rows are that table's, so the shape follows the
+  kind of complex column. **Attachment** fields return nothing yet: rows of the flat table behind
+  them decode with most columns null, including the one linking back to the owning row. That is a
+  row-decoding fault on tables mixing several fixed columns with OLE and Memo — `MSysResources`'s
+  flat table shows it too — not something specific to attachments.
 - **`Index.IndexDataNumber`** — which index-data block in the TDEF holds an index's tree.
+
+### Performance
+
+- **Inserting no longer reads the whole table.** Finding a page with room walked the owned-pages
+  map — every page the table has ever used — so loading n rows cost O(n²) page reads. The
+  free-space map, which the table already carried and this library never wrote to, is used and
+  maintained instead: 4000 rows now cost about nine page reads each.
+- **Deleting and updating seek instead of scanning**, through a single-column index on the column
+  when there is one, and act on the row pointer they find rather than searching again.
+- **Emptied pages are reused.** A page whose every row is deleted is reset and put back on the
+  free-space map, so a file that churns stops growing without bound. Space inside a page that still
+  holds live rows needs the page compacted, which is not done.
 
 ### Changed
 
