@@ -27,6 +27,7 @@ internal static class TdefReader
         int FreeSpaceUmapPage,
         int FreeSpaceUmapRow,
         IReadOnlyDictionary<string, int> LvalColumnUmapPages,
+        IReadOnlyDictionary<string, int> LvalColumnUmapRows,
         IReadOnlyList<Index> Indexes);
 
     /// <summary>Number of slots in an index column block's column array (always 10 in real Access).</summary>
@@ -153,6 +154,7 @@ internal static class TdefReader
         // Read LVAL usage-map refs (4 bytes each: 1-byte row + 3-byte page),
         // one entry per long-value (Memo/OLE) column in column-number order.
         var lvalUmapPages = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var lvalUmapRows  = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var lvalCols = columns.Where(c => c.DataType.IsLongValue()).ToList();
 
         // Access precedes the references with a 2-byte count of them. Reading straight into the
@@ -171,10 +173,14 @@ internal static class TdefReader
         for (int i = 0; i < lvalCols.Count && pos + 4 <= page.Length; i++)
         {
             // byte 0 = row number (always 0 for owned-pages bitmap, ignored here)
+            int lvalRow  = page[pos];
             int lvalPage = ByteUtil.Get3ByteInt(page, pos + 1);
             pos += 4;
             if (lvalPage > 0)
+            {
                 lvalUmapPages[lvalCols[i].Name] = lvalPage;
+                lvalUmapRows [lvalCols[i].Name] = lvalRow;
+            }
         }
 
         return new TdefInfo(
@@ -185,6 +191,7 @@ internal static class TdefReader
             FreeSpaceUmapPage:    freePage,
             FreeSpaceUmapRow:     freeRow,
             LvalColumnUmapPages:  lvalUmapPages,
+            LvalColumnUmapRows:   lvalUmapRows,
             Indexes:              indexes);
     }
 

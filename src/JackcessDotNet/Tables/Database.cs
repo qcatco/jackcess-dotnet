@@ -665,6 +665,8 @@ public sealed class Database : IDisposable
 
         foreach (var kvp in info.LvalColumnUmapPages)
             tableDef.LvalColumnUmapPages[kvp.Key] = kvp.Value;
+        foreach (var kvp in info.LvalColumnUmapRows)
+            tableDef.LvalColumnUmapRows[kvp.Key] = kvp.Value;
 
         // Reattach in-memory PK config from the on-disk metadata so that
         // IndexCursor.FindRowByPrimaryKey works across open/close boundaries.

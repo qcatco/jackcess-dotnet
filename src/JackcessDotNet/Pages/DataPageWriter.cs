@@ -58,7 +58,8 @@ public sealed class DataPageWriter
                 tableDef.LvalColumnUmapPages.TryGetValue(col.Name, out int umapPage))
             {
                 lvalWriters ??= new Dictionary<string, LvalWriter>(StringComparer.OrdinalIgnoreCase);
-                lvalWriters[col.Name] = new LvalWriter(_file, _allocator, umapPage);
+                tableDef.LvalColumnUmapRows.TryGetValue(col.Name, out int umapRow);
+                lvalWriters[col.Name] = new LvalWriter(_file, _allocator, umapPage, umapRow);
             }
         }
 

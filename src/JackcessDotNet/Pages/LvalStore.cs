@@ -22,14 +22,24 @@ internal sealed class LvalWriter
 {
     private readonly PageFile      _file;
     private readonly PageAllocator _allocator;
-    private readonly int           _umapPageNumber;   // LVAL column's umap page (row 0 = owned pages)
+    private readonly int           _umapPageNumber;   // page holding the column's usage map
+    /// <summary>
+    /// Which row of that page is the column's map. A table this library creates gives every
+    /// long-value column a page of its own, so it is row 0; Access instead keeps them as further
+    /// rows of the table's own usage-map page, where row 0 is the table's owned-pages map. Writing
+    /// to row 0 there added long-value pages to the table's page list, so a scan of the table read
+    /// them as rows — this library counted one more row than Access did — and the chain itself was
+    /// not where Access looks for it.
+    /// </summary>
+    private readonly int           _umapRow;
     private readonly JetFormat     _format;
 
-    public LvalWriter(PageFile file, PageAllocator allocator, int umapPageNumber)
+    public LvalWriter(PageFile file, PageAllocator allocator, int umapPageNumber, int umapRow = 0)
     {
         _file           = file      ?? throw new ArgumentNullException(nameof(file));
         _allocator      = allocator ?? throw new ArgumentNullException(nameof(allocator));
         _umapPageNumber = umapPageNumber;
+        _umapRow        = umapRow;
         _format         = file.Format;
     }
 
@@ -99,7 +109,7 @@ internal sealed class LvalWriter
 
         // Find an existing LVAL page with enough room.
         byte[] umapPage  = _file.ReadPage(_umapPageNumber);
-        var    ownedList = UsageMap.GetOwnedPages(umapPage, 0 /* OwnedPagesRow */, _format, _file);
+        var    ownedList = UsageMap.GetOwnedPages(umapPage, _umapRow, _format, _file);
         int    lvalPage  = -1;
 
         foreach (int pn in ownedList)
@@ -116,7 +126,7 @@ internal sealed class LvalWriter
             // record the page must not cost one.
             // tdefPageNumber = 0: LVAL pages are not owned by a user TDEF.
             lvalPage = _allocator.NextPageNumber;
-            if (!UsageMap.CanAddPage(umapPage, 0 /* OwnedPagesRow */, lvalPage, _format, out string? refusal))
+            if (!UsageMap.CanAddPage(umapPage, _umapRow, lvalPage, _format, out string? refusal))
                 throw new NotSupportedException(refusal);
 
             int allocated = _allocator.AllocateDataPage(0);
@@ -124,7 +134,7 @@ internal sealed class LvalWriter
                 throw new InvalidOperationException(
                     $"Allocated LVAL page {allocated} but the usage-map was checked for page {lvalPage}.");
 
-            UsageMap.AddPage(umapPage, 0 /* OwnedPagesRow */, allocated, _format, _allocator, _file);
+            UsageMap.AddPage(umapPage, _umapRow, allocated, _format, _allocator, _file);
             _file.WritePage(_umapPageNumber, umapPage);
         }
 

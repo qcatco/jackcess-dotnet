@@ -88,6 +88,15 @@ public sealed class TableDefinition
         = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
+    /// Which row of <see cref="LvalColumnUmapPages"/>'s page holds each long-value column's map.
+    /// Absent means row 0, which is what a table this library creates uses — it gives every such
+    /// column a page to itself. Access shares one page across the table and its columns, so there
+    /// row 0 belongs to the table.
+    /// </summary>
+    public Dictionary<string, int> LvalColumnUmapRows { get; }
+        = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Real B-tree indexes parsed from the on-disk TDEF (empty for tables this
     /// library creates, since we don't yet serialize real index column blocks).
     /// </summary>

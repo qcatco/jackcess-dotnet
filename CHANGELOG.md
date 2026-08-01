@@ -40,6 +40,12 @@ files the ACE engine wrote and querying the results back through
   variable area, as null. The encoder now takes the same flag and can emit a fixed-width type into
   the variable area, mirroring the branch the decoder gained. Every write test in this suite runs
   against Jet 4 `.mdb`, where no column disagrees with its type, which is how the two drifted apart.
+- **Long-value pages were added to the table's own page list.** `LvalWriter` assumed its usage map
+  was row 0 of its page, which holds for a table this library creates — each long-value column gets
+  a page to itself — but Access keeps those maps as further rows of the table's *own* usage-map
+  page, where row 0 is the table's owned-pages map. So writing a Memo added its pages to the
+  table's page list, and a scan then read them as rows: this library counted one row more than
+  Access did. The reference's row is now carried alongside its page, and the two counts agree.
 - **Long-value usage-map references were read one field early.** Access precedes them with a
   2-byte count, which was being consumed as part of the first reference — turning row 2 of page 110
   into page 0x6E0200. Writing a Memo then read far past the end of the file. Reading one never
@@ -115,7 +121,7 @@ files the ACE engine wrote and querying the results back through
   across the whole flat table rather than per owning row. Works for multi-value fields and
   attachments — the ACE engine reads both back from a file this library wrote into. Writing a Memo
   or OLE value into an `.accdb` is not there yet: it completes and round-trips here, but Access
-  reads the value as empty.
+  reads it back as empty — though the page accounting around it is now correct.
 - **`PageFile.PagesRead`** — page reads are what an operation costs, and no correctness test can
   tell a seek from a scan.
 - **Reading complex columns** — multi-value fields, attachments and append-only memo history, via

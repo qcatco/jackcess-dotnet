@@ -252,7 +252,8 @@ database has no such stream.
 ⁸ Ordinary rows and complex values write correctly into an existing `.accdb`, and the ACE
 engine reads both back — including a multi-value entry and an attachment appended by
 `AddComplexValue`. A Memo or OLE value is not there yet: the write completes and round-trips
-through this library, but ACE reads the value as empty, and counts one row fewer in the table
-than this library does. Both point at the long-value chain rather than the row. Note that
+through this library, but ACE reads the value back as empty. The page accounting around it is
+now right — Access and this library agree on the table's row count, which they did not before
+the long-value map's *row* was honoured — so what remains is the chain's own content. Note that
 every other write path here is exercised against Jet 4 `.mdb` — that gap is how the encoder
 came to disagree with the reader about where a value lives.
