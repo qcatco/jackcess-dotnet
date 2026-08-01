@@ -26,7 +26,7 @@ public sealed class RowEncoder
         short varIndex = 0;
         foreach (var col in _columns.OrderBy(c => c.ColumnNumber))
         {
-            if (col.DataType.IsVariableLength())
+            if (col.IsVariableLengthStorage)
             {
                 _varIndexes[col] = varIndex++;
             }
@@ -72,7 +72,7 @@ public sealed class RowEncoder
         int fixedDataEnd = fixedDataStart;
         foreach (var col in _columns.OrderBy(c => c.ColumnNumber))
         {
-            if (col.DataType.IsVariableLength())
+            if (col.IsVariableLengthStorage)
                 continue;
 
             object? value = row.TryGetValue(col.Name, out var v) ? v : null;
@@ -111,7 +111,7 @@ public sealed class RowEncoder
             // Variable-length data — also in column-number order to match var index assignment
             foreach (var col in _columns.OrderBy(c => c.ColumnNumber))
             {
-                if (!col.DataType.IsVariableLength())
+                if (!col.IsVariableLengthStorage)
                     continue;
 
                 short offset = (short)pos;
@@ -273,7 +273,21 @@ public sealed class RowEncoder
                 return BuildInlineLvRef(oleBytes);
             }
             default:
+            {
+                // A type that is normally fixed-width, stored in the variable area because the
+                // column's flag says so — Access does that for the foreign keys of a complex
+                // column's flat table. The bytes are the same either way, so the fixed encoder
+                // produces them; only where they land differs. The reader has the matching branch.
+                int width = col.DataType.GetFixedSize();
+                if (width > 0)
+                {
+                    var bytes = new byte[width];
+                    WriteFixedValue(bytes, 0, col, value);
+                    return bytes;
+                }
+
                 throw new NotSupportedException($"Unsupported variable data type {col.DataType}.");
+            }
         }
     }
 }

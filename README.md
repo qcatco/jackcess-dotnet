@@ -151,8 +151,9 @@ materialising the whole table.
 | Reclaiming space from deleted rows                | ✅ Whole emptied pages, and gaps within pages still in use |
 | Table definitions spanning several pages          | ✅ Read and written |
 | Reading complex columns (multi-value, attachments, memo history) | ✅ `Table.GetComplexValues` |
-| Writing complex columns                           | ⚠️ `Table.AddComplexValue` exists but is blocked⁸ |
-| **Writing to `.accdb` (ACE format) at all**        | ❌ Reading is fine; any insert fails⁸ |
+| Writing complex columns                           | ✅ `Table.AddComplexValue` — multi-value and attachments |
+| Writing rows into an existing `.accdb`            | ✅ ⁸ |
+| Writing a Memo / OLE value into an `.accdb`       | ❌ Its long-value usage-map reference misparses⁸ |
 | Memo / OLE long values                            | ✅      |
 | PropertyMap & MSysRelationships                   | ✅      |
 | Password-protected `.mdb` (Jet RC4 codec)         | ✅      |
@@ -248,10 +249,8 @@ the DAO engine substitutes. Which bytes the hash covers is the caller's to decid
 specification defines it over an OOXML package's encrypted stream, and an Access
 database has no such stream.
 
-⁸ Every write path in this library is exercised against Jet 4 `.mdb`. Writing to an
-ACE-format `.accdb` does not work — a plain insert into an ordinary table of one throws
-while reading a page number far past the end of the file — and since complex columns
-exist only in `.accdb`, `Table.AddComplexValue` cannot be exercised end to end. Its link
-handling is derived from the on-disk evidence (the flat row's foreign key is the owning
-row's complex id; its own id counts up across the whole flat table), and the blocker is
-pinned by a test so it announces itself when ACE writing lands.
+⁸ Ordinary rows and complex values write correctly into an existing `.accdb`. What still
+fails is a Memo or OLE value: the long-value usage-map reference read out of that table's
+definition is not a real page, so the writer reads far past the end of the file. Pinned by
+a test. Note that every other write path here is exercised against Jet 4 `.mdb` — that gap
+is how the encoder came to disagree with the reader about where a value lives.

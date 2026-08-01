@@ -4,19 +4,16 @@ using Xunit;
 namespace JackcessDotNet.Tests;
 
 /// <summary>
-/// <see cref="Table.AddComplexValue"/> and the state of writing to ACE-format files.
+/// Appending values to a complex column with <see cref="Table.AddComplexValue"/>. The values live
+/// in a per-column flat table linked to the owning row by its complex id, so writing one means
+/// filling both link columns: the foreign key back to the row, and the flat row's own sequential
+/// id, which Access numbers across the whole flat table rather than per owning row.
 /// <para>
-/// The write path is built and its link handling is derived from the on-disk evidence: the flat
-/// row's foreign key is the owning row's complex id, and its own id counts up across the whole flat
-/// table. It cannot be exercised end to end, because complex columns exist only in <c>.accdb</c>
-/// files and <b>writing to an .accdb does not work at all</b> — a plain insert into an ordinary
-/// table of one throws while reading a page number far past the end of the file. Every write test
-/// in this suite runs against Jet 4 <c>.mdb</c>, which is how that went unnoticed.
-/// </para>
-/// <para>
-/// The test below pins that blocker. It is expected to start failing the day ACE writing works,
-/// which is the point: that is when the complex-column write path can be verified and this file
-/// replaced with tests that actually exercise it.
+/// These run against an <c>.accdb</c>, which is the only place complex columns exist, and are the
+/// first write tests in this suite that do — everything else writes Jet 4 <c>.mdb</c>. That gap is
+/// how the encoder came to disagree with the reader about where a value lives: Access stores these
+/// flat tables' Long foreign keys in the variable-length area, the reader was taught to follow the
+/// column's flag, and the writer went on placing them at a fixed offset.
 /// </para>
 /// </summary>
 public sealed class ComplexColumnWriteTests : IDisposable
@@ -36,49 +33,154 @@ public sealed class ComplexColumnWriteTests : IDisposable
         return true;
     }
 
-    /// <summary>
-    /// Writing to an ACE-format file is broken, independently of anything to do with complex
-    /// columns. Recorded as a test so the limitation is visible in the suite rather than only in a
-    /// document, and so it announces itself when fixed.
-    /// </summary>
+    private static Row RowWithId(Table table, string id)
+        => table.ReadAllRows().Single(r => (string)r["id"]! == id);
+
     [Fact]
-    public void WritingToAnAccdb_DoesNotWorkYet()
+    public void APlainRowCanBeInsertedIntoAnAccdb()
+    {
+        if (!TryStage()) return;
+
+        using (var db = Database.Open(_path))
+            db.GetTable("Table1").Insert(new Row { ["id"] = "written" });
+
+        using var reopened = Database.Open(_path);
+        Assert.Equal(5, reopened.GetTable("Table1").ReadAllRows().Count);
+    }
+
+    [Fact]
+    public void AValueAddedToAMultiValueField_IsReadBack()
+    {
+        if (!TryStage()) return;
+
+        using (var db = Database.Open(_path))
+        {
+            var t = db.GetTable("Table1");
+            // row1 starts with none, so the new value cannot be confused with an existing one.
+            t.AddComplexValue(RowWithId(t, "row1"), "multi-value-data", new Row { ["Value"] = "added-by-test" });
+        }
+
+        using var reopened = Database.Open(_path);
+        var table = reopened.GetTable("Table1");
+
+        Assert.Equal(
+            new[] { "added-by-test" },
+            table.GetComplexValues(RowWithId(table, "row1"), "multi-value-data")
+                 .Select(v => (string)v["Value"]!));
+    }
+
+    [Fact]
+    public void AValueAddedToARowThatAlreadyHasSome_JoinsThemRatherThanReplacing()
+    {
+        if (!TryStage()) return;
+
+        using (var db = Database.Open(_path))
+        {
+            var t = db.GetTable("Table1");
+            t.AddComplexValue(RowWithId(t, "row2"), "multi-value-data", new Row { ["Value"] = "value9" });
+        }
+
+        using var reopened = Database.Open(_path);
+        var table = reopened.GetTable("Table1");
+
+        Assert.Equal(
+            new[] { "value1", "value4", "value9" },
+            table.GetComplexValues(RowWithId(table, "row2"), "multi-value-data")
+                 .Select(v => (string)v["Value"]!));
+    }
+
+    /// <summary>The link is per row, so other rows' values must not move.</summary>
+    [Fact]
+    public void AddingToOneRow_LeavesTheOtherRowsAlone()
+    {
+        if (!TryStage()) return;
+
+        using (var db = Database.Open(_path))
+        {
+            var t = db.GetTable("Table1");
+            t.AddComplexValue(RowWithId(t, "row1"), "multi-value-data", new Row { ["Value"] = "added" });
+        }
+
+        using var reopened = Database.Open(_path);
+        var table = reopened.GetTable("Table1");
+
+        Assert.Equal(4, table.GetComplexValues(RowWithId(table, "row3"), "multi-value-data").Count);
+        Assert.Empty(table.GetComplexValues(RowWithId(table, "row4"), "multi-value-data"));
+    }
+
+    [Fact]
+    public void AnAttachmentIsAddedWithItsFileMetadata()
+    {
+        if (!TryStage()) return;
+
+        using (var db = Database.Open(_path))
+        {
+            var t = db.GetTable("Table1");
+            t.AddComplexValue(RowWithId(t, "row1"), "attach-data", new Row
+            {
+                ["FileName"]  = "written.txt",
+                ["FileType"]  = "txt",
+                ["FileFlags"] = 0,
+            });
+        }
+
+        using var reopened = Database.Open(_path);
+        var table = reopened.GetTable("Table1");
+
+        Row added = Assert.Single(table.GetComplexValues(RowWithId(table, "row1"), "attach-data"));
+        Assert.Equal("written.txt", added["FileName"]);
+        Assert.Equal("txt", added["FileType"]);
+
+        // The attachments already on rows 2 and 4 are untouched.
+        Assert.Equal(2, table.GetComplexValues(RowWithId(table, "row2"), "attach-data").Count);
+        Assert.Single(table.GetComplexValues(RowWithId(table, "row4"), "attach-data"));
+    }
+
+    /// <summary>The flat row's own id counts across the table, so two additions must not collide.</summary>
+    [Fact]
+    public void TheFlatRowsOwnIdContinuesAcrossTheWholeTable()
     {
         if (!TryStage()) return;
 
         using var db = Database.Open(_path);
-        var table = db.GetTable("Table1");
+        var t = db.GetTable("Table1");
 
-        Assert.ThrowsAny<Exception>(
-            () => table.Insert(new Row { ["id"] = "probe-row", ["memo-data"] = "hello" }));
+        Row first  = t.AddComplexValue(RowWithId(t, "row1"), "multi-value-data", new Row { ["Value"] = "a" });
+        Row second = t.AddComplexValue(RowWithId(t, "row4"), "multi-value-data", new Row { ["Value"] = "b" });
+
+        const string OwnId = "Table1_multi-value-data";
+        Assert.True((int)first[OwnId]! > 6, "the fixture already uses 1..6, so a new id continues past them");
+        Assert.NotEqual((int)first[OwnId]!, (int)second[OwnId]!);
     }
 
-    /// <summary>The argument checks do not depend on the write ever reaching the file.</summary>
     [Fact]
     public void AddingToSomethingThatIsNotAComplexColumn_SaysSo()
     {
         if (!TryStage()) return;
 
         using var db = Database.Open(_path);
-        var table = db.GetTable("Table1");
-        Row row = table.ReadAllRows().First();
+        var t = db.GetTable("Table1");
 
         var ex = Assert.Throws<InvalidOperationException>(
-            () => table.AddComplexValue(row, "memo-data", new Row { ["Value"] = "x" }));
+            () => t.AddComplexValue(RowWithId(t, "row1"), "memo-data", new Row { ["Value"] = "x" }));
         Assert.Contains("not a complex column", ex.Message);
     }
 
+    /// <summary>
+    /// Writing a Memo or OLE value into this .accdb still fails: the long-value usage-map reference
+    /// parsed out of its table definition is not a real page, so the writer reads far past the end
+    /// of the file. Pinned here so it announces itself when fixed — the complex-column writes above
+    /// do not go through that path.
+    /// </summary>
     [Fact]
-    public void AddingToARowWithNoComplexId_SaysSo()
+    public void WritingAMemoValueIntoAnAccdb_DoesNotWorkYet()
     {
         if (!TryStage()) return;
 
         using var db = Database.Open(_path);
-        var table = db.GetTable("Table1");
+        var t = db.GetTable("Table1");
 
-        var ex = Assert.Throws<InvalidOperationException>(
-            () => table.AddComplexValue(new Row { ["id"] = "detached" }, "multi-value-data",
-                                        new Row { ["Value"] = "x" }));
-        Assert.Contains("no complex id", ex.Message);
+        Assert.ThrowsAny<Exception>(
+            () => t.Insert(new Row { ["id"] = "with-memo", ["memo-data"] = "hello" }));
     }
 }

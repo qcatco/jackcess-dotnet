@@ -33,6 +33,13 @@ files the ACE engine wrote and querying the results back through
   index rather than by scanning, and a count of zero against a tree that does hold entries
   makes it fail those with "Invalid argument" even though a seek through the same index
   works.
+- **The row writer placed values where the reader no longer looked for them.** Reading was taught
+  to take a column's storage class from its fixed-length flag rather than from its type; the writer
+  went on deciding by type, so a Long that Access stores in the variable-length area — the foreign
+  key of a complex column's flat table — was written at a fixed offset and read back from the
+  variable area, as null. The encoder now takes the same flag and can emit a fixed-width type into
+  the variable area, mirroring the branch the decoder gained. Every write test in this suite runs
+  against Jet 4 `.mdb`, where no column disagrees with its type, which is how the two drifted apart.
 - **A column's storage class was inferred from its type instead of read from its flag.** Whether a
   value sits at a fixed offset or in the row's variable-length area is the column's own
   fixed-length flag; Access stores some numeric columns as variable-length, and the foreign key of
@@ -99,10 +106,9 @@ files the ACE engine wrote and querying the results back through
   none.
 - **`Table.AddComplexValue`** — appends one value to a complex column, filling both link columns:
   the foreign key back to the owning row and the flat row's own sequential id, which Access numbers
-  across the whole flat table rather than per owning row. **Blocked, not finished:** complex columns
-  exist only in `.accdb`, and writing to an ACE-format file does not work — a plain insert into an
-  ordinary table of one throws. Every write path here is exercised against Jet 4 `.mdb`, which is
-  how that went unnoticed; a test now pins it.
+  across the whole flat table rather than per owning row. Works for multi-value fields and
+  attachments. Writing a Memo or OLE value into an `.accdb` still fails on a misparsed long-value
+  usage-map reference, which is pinned by a test.
 - **`PageFile.PagesRead`** — page reads are what an operation costs, and no correctness test can
   tell a seek from a scan.
 - **Reading complex columns** — multi-value fields, attachments and append-only memo history, via
