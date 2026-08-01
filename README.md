@@ -151,6 +151,8 @@ materialising the whole table.
 | Reclaiming space from deleted rows                | ✅ Whole emptied pages, and gaps within pages still in use |
 | Table definitions spanning several pages          | ✅ Read and written |
 | Reading complex columns (multi-value, attachments, memo history) | ✅ `Table.GetComplexValues` |
+| Writing complex columns                           | ⚠️ `Table.AddComplexValue` exists but is blocked⁸ |
+| **Writing to `.accdb` (ACE format) at all**        | ❌ Reading is fine; any insert fails⁸ |
 | Memo / OLE long values                            | ✅      |
 | PropertyMap & MSysRelationships                   | ✅      |
 | Password-protected `.mdb` (Jet RC4 codec)         | ✅      |
@@ -245,3 +247,11 @@ element to recompute, or real Access to open one written here, and neither the A
 the DAO engine substitutes. Which bytes the hash covers is the caller's to decide; the
 specification defines it over an OOXML package's encrypted stream, and an Access
 database has no such stream.
+
+⁸ Every write path in this library is exercised against Jet 4 `.mdb`. Writing to an
+ACE-format `.accdb` does not work — a plain insert into an ordinary table of one throws
+while reading a page number far past the end of the file — and since complex columns
+exist only in `.accdb`, `Table.AddComplexValue` cannot be exercised end to end. Its link
+handling is derived from the on-disk evidence (the flat row's foreign key is the owning
+row's complex id; its own id counts up across the whole flat table), and the blocker is
+pinned by a test so it announces itself when ACE writing lands.

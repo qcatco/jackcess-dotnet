@@ -134,6 +134,78 @@ public sealed class Table
     }
 
     /// <summary>
+    /// Appends a value to a complex column of <paramref name="row"/> — one entry of a multi-value
+    /// field, one attachment, one memo-history revision.
+    /// <para>
+    /// The values live in a per-column flat table, linked to the owning row by its 4-byte complex
+    /// id. <paramref name="value"/> supplies that table's own columns — <c>Value</c> for a
+    /// multi-value field, <c>FileName</c>/<c>FileType</c>/<c>FileData</c>… for an attachment — and
+    /// the two link columns are filled here: the foreign key back to the owning row, and the flat
+    /// row's own sequential id, which Access numbers per flat table rather than per owning row.
+    /// </para>
+    /// <para>
+    /// An attachment's <c>FileData</c> is written exactly as given. Access stores attachment bytes
+    /// behind a small header of its own and may compress them, so a payload written raw here reads
+    /// back byte-for-byte through this library but is not what Access would have written.
+    /// </para>
+    /// </summary>
+    /// <returns>The row as written to the flat table, link columns included.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// The column is not complex, the row carries no complex id, or the flat table behind the
+    /// column cannot be resolved.
+    /// </exception>
+    public Row AddComplexValue(Row row, string columnName, Row value)
+    {
+        if (row is null)        throw new ArgumentNullException(nameof(row));
+        if (columnName is null) throw new ArgumentNullException(nameof(columnName));
+        if (value is null)      throw new ArgumentNullException(nameof(value));
+
+        var column = _definition.Columns.FirstOrDefault(
+            c => c.Name.Equals(columnName, StringComparison.OrdinalIgnoreCase));
+        if (column is null || column.DataType != DataType.Complex)
+            throw new InvalidOperationException(
+                $"Column '{columnName}' on '{Name}' is not a complex column.");
+
+        if (!row.TryGetValue(column.Name, out object? idValue) || idValue is not int complexId || complexId == 0)
+            throw new InvalidOperationException(
+                $"The row carries no complex id for '{columnName}', so there is nothing to attach a " +
+                "value to. Complex ids are assigned when the owning row is created.");
+
+        if (_owningDb is null)
+            throw new InvalidOperationException("This table is not attached to a database.");
+
+        var flat = ComplexColumns.ResolveFlatTable(_owningDb, _definition.TdefPageNumber, column.Name)
+            ?? throw new InvalidOperationException(
+                $"No flat table is registered for complex column '{columnName}' on '{Name}'.");
+
+        var backRef = ComplexColumns.FindBackReference(flat, Name, column.Name)
+            ?? throw new InvalidOperationException(
+                $"The flat table for '{columnName}' has no column linking back to '{Name}'.");
+
+        var written = new Row();
+        foreach (var kvp in value) written[kvp.Key] = kvp.Value;
+        written[backRef.Name] = complexId;
+
+        // The flat row's own id counts up across the whole flat table, not per owning row, so it
+        // continues from the highest already stored.
+        var ownId = ComplexColumns.FindOwnId(flat, Name, column.Name, backRef);
+        if (ownId is not null && !written.ContainsKey(ownId.Name))
+            written[ownId.Name] = NextComplexOwnId(flat, ownId);
+
+        flat.Insert(written);
+        return written;
+    }
+
+    private static int NextComplexOwnId(Table flat, Column ownId)
+    {
+        int highest = 0;
+        foreach (var existing in flat.ReadAllRows())
+            if (existing.TryGetValue(ownId.Name, out object? v) && v is int id && id > highest)
+                highest = id;
+        return highest + 1;
+    }
+
+    /// <summary>
     /// Works out which indexes have no entry to take for this row — one with no tree, or one that
     /// ignores nulls when a key column is null — and returns their ordinals so
     /// <see cref="AddIndexEntries"/> leaves them alone. An index that could not be kept correct at

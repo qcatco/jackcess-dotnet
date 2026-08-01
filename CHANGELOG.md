@@ -97,6 +97,12 @@ files the ACE engine wrote and querying the results back through
   Access to open one written here. Which bytes the hash covers is left to the caller — the
   specification defines it over an OOXML package's encrypted stream and an Access database has
   none.
+- **`Table.AddComplexValue`** — appends one value to a complex column, filling both link columns:
+  the foreign key back to the owning row and the flat row's own sequential id, which Access numbers
+  across the whole flat table rather than per owning row. **Blocked, not finished:** complex columns
+  exist only in `.accdb`, and writing to an ACE-format file does not work — a plain insert into an
+  ordinary table of one throws. Every write path here is exercised against Jet 4 `.mdb`, which is
+  how that went unnoticed; a test now pins it.
 - **`PageFile.PagesRead`** — page reads are what an operation costs, and no correctness test can
   tell a seek from a scan.
 - **Reading complex columns** — multi-value fields, attachments and append-only memo history, via

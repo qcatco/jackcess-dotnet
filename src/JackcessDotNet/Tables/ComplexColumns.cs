@@ -81,4 +81,25 @@ internal static class ComplexColumns
         return flatTable.Columns.FirstOrDefault(c => c.Name.Equals(bare,      StringComparison.OrdinalIgnoreCase))
             ?? flatTable.Columns.FirstOrDefault(c => c.Name.Equals(qualified, StringComparison.OrdinalIgnoreCase));
     }
+
+    /// <summary>
+    /// The flat table's own sequential id column — <c>&lt;OwningTable&gt;_&lt;column&gt;</c>, the
+    /// twin of the back-reference. It numbers the values across the whole flat table rather than
+    /// per owning row, so a writer has to continue it rather than restart at 1.
+    /// </summary>
+    /// <returns>Null when the table has no such column, or when it is the back-reference itself —
+    /// which happens when only one of the pair is present.</returns>
+    internal static Column? FindOwnId(Table flatTable, string owningTableName, string columnName,
+                                      Column backReference)
+    {
+        string qualified = $"{owningTableName}_{columnName}";
+
+        var col = flatTable.Columns.FirstOrDefault(
+            c => c.Name.Equals(qualified, StringComparison.OrdinalIgnoreCase));
+
+        return col is null || ReferenceEquals(col, backReference)
+            || col.Name.Equals(backReference.Name, StringComparison.OrdinalIgnoreCase)
+                ? null
+                : col;
+    }
 }
