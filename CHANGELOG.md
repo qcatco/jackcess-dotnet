@@ -33,6 +33,16 @@ files the ACE engine wrote and querying the results back through
   index rather than by scanning, and a count of zero against a tree that does hold entries
   makes it fail those with "Invalid argument" even though a seek through the same index
   works.
+- **A column's storage class was inferred from its type instead of read from its flag.** Whether a
+  value sits at a fixed offset or in the row's variable-length area is the column's own
+  fixed-length flag; Access stores some numeric columns as variable-length, and the foreign key of
+  a complex column's flat table is a `Long` stored exactly that way. Reading those at a fixed
+  offset returned whatever happened to be there — the link from an attachment to its row came back
+  null, and its sibling column read a value belonging to neither. The row decoder also had no
+  branch for a fixed-width type found in the variable area, and `ComplexColumns` preferred the
+  table-qualified back-reference over the bare one, which agreed only while both were being read
+  from the same wrong offset. With all three corrected, attachments resolve to exactly the counts
+  Jackcess Java asserts for `complexDataV2007.accdb`.
 - **Rows were threaded only into the primary-key index.** Appending 500 rows to an
   Access-authored table left Access reporting one row — its own — for anything that used
   another index.
@@ -80,13 +90,10 @@ files the ACE engine wrote and querying the results back through
   reporting *no indexes at all*, so appending to such a table left every index untouched.
 - **`PageFile.PagesRead`** — page reads are what an operation costs, and no correctness test can
   tell a seek from a scan.
-- **Reading complex columns** — multi-value fields and append-only memo history, via
+- **Reading complex columns** — multi-value fields, attachments and append-only memo history, via
   `Table.GetComplexValues(row, columnName)`. The row stores a 4-byte id; `MSysComplexColumns` maps
   the column to its flat table, and the returned rows are that table's, so the shape follows the
-  kind of complex column. **Attachment** fields return nothing yet: rows of the flat table behind
-  them decode with most columns null, including the one linking back to the owning row. That is a
-  row-decoding fault on tables mixing several fixed columns with OLE and Memo — `MSysResources`'s
-  flat table shows it too — not something specific to attachments.
+  kind of complex column.
 - **`Index.IndexDataNumber`** — which index-data block in the TDEF holds an index's tree.
 
 ### Performance

@@ -98,4 +98,43 @@ public sealed class ComplexColumnReadTests
         Assert.Empty(table.GetComplexValues(row, "id"));
         Assert.Empty(table.GetComplexValues(row, "no-such-column"));
     }
+
+    /// <summary>
+    /// Attachments, with the counts Jackcess Java's own ComplexColumnTest asserts for this
+    /// fixture: row2 carries test_data.txt and test_data2.txt, row4 carries test_data2.txt, and
+    /// rows 1 and 3 carry none.
+    /// <para>
+    /// These returned nothing at all until two faults were fixed. Access stores the flat table's
+    /// foreign key as a <em>variable-length</em> Long — the storage class is the column's own flag,
+    /// not something its type implies — and the row decoder had no branch for a fixed-width type
+    /// living in the variable area. On top of that the back-reference resolver preferred the
+    /// table-qualified column over the bare one, which matched only while both were being read
+    /// from the same wrong offset.
+    /// </para>
+    /// </summary>
+    [Fact]
+    public void GetComplexValues_ReturnsAttachments()
+    {
+        string? corpus = CorpusPath.Resolve();
+        if (corpus is null) return;
+        string path = Path.Combine(corpus, "V2007", "complexDataV2007.accdb");
+        if (!File.Exists(path)) return;
+
+        using var db = Database.Open(path);
+        var table = db.GetTable("Table1");
+
+        var byRow = new Dictionary<string, List<string>>();
+        foreach (var row in table.ReadAllRows())
+        {
+            string id = (string)row["id"]!;
+            byRow[id] = table.GetComplexValues(row, "attach-data")
+                             .Select(v => (string)v["FileName"]!)
+                             .ToList();
+        }
+
+        Assert.Empty(byRow["row1"]);
+        Assert.Equal(new[] { "test_data.txt", "test_data2.txt" }, byRow["row2"]);
+        Assert.Empty(byRow["row3"]);
+        Assert.Equal(new[] { "test_data2.txt" }, byRow["row4"]);
+    }
 }

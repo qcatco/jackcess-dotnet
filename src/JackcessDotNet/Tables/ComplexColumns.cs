@@ -70,10 +70,15 @@ internal static class ComplexColumns
     /// </summary>
     internal static Column? FindBackReference(Table flatTable, string owningTableName, string columnName)
     {
-        string qualified = $"{owningTableName}_{columnName}";
         string bare      = $"_{columnName}";
+        string qualified = $"{owningTableName}_{columnName}";
 
-        return flatTable.Columns.FirstOrDefault(c => c.Name.Equals(qualified, StringComparison.OrdinalIgnoreCase))
-            ?? flatTable.Columns.FirstOrDefault(c => c.Name.Equals(bare,      StringComparison.OrdinalIgnoreCase));
+        // The bare "_<column>" holds the owning row's complex id; the table-qualified twin holds
+        // the value's own id within the column. Preferring the qualified one matched anyway while
+        // both were being read from the same wrong offset, and broke as soon as they decoded
+        // apart — the multi-value row whose owner is 2 has _multi-value-data = 2 and
+        // Table1_multi-value-data = 1.
+        return flatTable.Columns.FirstOrDefault(c => c.Name.Equals(bare,      StringComparison.OrdinalIgnoreCase))
+            ?? flatTable.Columns.FirstOrDefault(c => c.Name.Equals(qualified, StringComparison.OrdinalIgnoreCase));
     }
 }

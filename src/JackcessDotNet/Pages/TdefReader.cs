@@ -31,6 +31,8 @@ internal static class TdefReader
 
     /// <summary>Number of slots in an index column block's column array (always 10 in real Access).</summary>
     private const int MaxIndexColumns = 10;
+    /// <summary>Column-flags bit marking a value stored at a fixed offset in the row.</summary>
+    private const byte ColumnFlagFixedLength = 0x01;
     /// <summary>Sentinel column-number value meaning "this slot is unused".</summary>
     private const short ColumnUnused = unchecked((short)0xFFFF);
 
@@ -96,9 +98,17 @@ internal static class TdefReader
                 isCompressedUnicode: isCompUni);
 
             col.ColumnNumber = colNum;
-            // Honour the on-disk offsets so post-deletion tables decode correctly.
-            col.FixedDataOffset  = dataType.IsVariableLength() ? (short)-1 : fixedOffset;
-            col.VarLenTableIndex = dataType.IsVariableLength() ? varIndex     : (short)-1;
+
+            // Whether a value sits at a fixed offset or in the variable-length area is the
+            // column's own flag, not something its type implies. Access stores some Long columns
+            // as variable-length — the foreign key of a complex column's flat table is one — and
+            // classifying by type read those at a fixed offset, picking up whatever was there:
+            // the attachment link came back null and its sibling read a value from the wrong
+            // column. Jackcess Java takes the same bit.
+            bool isFixedLength = (flags & ColumnFlagFixedLength) != 0;
+            col.SetStorageFromFlags(isFixedLength);
+            col.FixedDataOffset  = isFixedLength ? fixedOffset : (short)-1;
+            col.VarLenTableIndex = isFixedLength ? (short)-1   : varIndex;
             columns.Add(col);
         }
 
@@ -294,5 +304,5 @@ internal static class TdefReader
             ColumnNumber     = src.ColumnNumber,
             FixedDataOffset  = src.FixedDataOffset,
             VarLenTableIndex = src.VarLenTableIndex,
-        };
+        }.WithStorageOf(src);
 }

@@ -41,7 +41,7 @@ internal sealed class RowDecoder
         // are included in varIndex just like Text/Binary.
         foreach (var col in columns.OrderBy(c => c.ColumnNumber))
         {
-            if (col.DataType.IsVariableLength())
+            if (col.IsVariableLengthStorage)
             {
                 // Honour the on-disk var-table index when available so post-deletion
                 // tables decode correctly; otherwise fall back to a tight assignment.
@@ -91,7 +91,7 @@ internal sealed class RowDecoder
         int fixedBase = _format.SizeRowColumnCount;
 
         // ── Fixed-length column ───────────────────────────────────────────────
-        if (!col.DataType.IsVariableLength())
+        if (!col.IsVariableLengthStorage)
         {
             if (!_fixedByteOffset.TryGetValue(col.ColumnNumber, out int relOff)) return null;
             int absOff = fixedBase + relOff;
@@ -150,7 +150,16 @@ internal sealed class RowDecoder
             DataType.Binary => rowBytes[varStart..varEnd],
             DataType.Memo   => DecodeMemoLvRef(rowBytes, varStart, varLen),
             DataType.Ole    => DecodeOleLvRef (rowBytes, varStart, varLen),
-            _               => null
+
+            // A type that is normally fixed-width can still be stored in the variable area —
+            // Access does that for the foreign keys of a complex column's flat table, which are
+            // Longs. The bytes are laid out exactly as they would be at a fixed offset, so the
+            // same reader handles them; returning null here instead made an attachment's link to
+            // its row disappear, and with it every attachment.
+            _ when varLen >= col.DataType.GetFixedSize()
+                => ReadFixed(rowBytes, varStart, col),
+
+            _ => null
         };
     }
 

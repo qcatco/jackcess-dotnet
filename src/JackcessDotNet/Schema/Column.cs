@@ -51,6 +51,34 @@ public sealed class Column
     /// <summary>0-based index into the variable-length offset table; -1 for fixed columns.</summary>
     public short VarLenTableIndex { get; internal set; } = -1;
 
+    private bool? _variableLengthStorage;
+
+    /// <summary>
+    /// Whether this column's value lives in the row's variable-length area rather than at a fixed
+    /// offset.
+    /// <para>
+    /// For a column read off disk this is the column's own fixed-length flag, not something its
+    /// type implies: Access stores some numeric columns as variable-length — the foreign key of a
+    /// complex column's flat table is a Long stored that way — and reading one at a fixed offset
+    /// picks up whatever happens to sit there. A column built in memory for a table being created
+    /// has no flag yet, so its type decides, which is what the writer then records.
+    /// </para>
+    /// </summary>
+    public bool IsVariableLengthStorage => _variableLengthStorage ?? DataType.IsVariableLength();
+
+    /// <summary>Records the storage class read from the column's on-disk flags.</summary>
+    internal void SetStorageFromFlags(bool isFixedLength) => _variableLengthStorage = !isFixedLength;
+
+    /// <summary>
+    /// Copies <paramref name="other"/>'s storage class onto this column. The reader rebuilds a
+    /// column once its name is known, and anything not carried across is silently lost.
+    /// </summary>
+    internal Column WithStorageOf(Column other)
+    {
+        _variableLengthStorage = other._variableLengthStorage;
+        return this;
+    }
+
     /// <summary>
     /// Whether this Text/Memo column stores values in Jet's compressed form — bit 0x01 of
     /// the column's ext-flags byte in the TDEF.

@@ -148,8 +148,7 @@ materialising the whole table.
 | Creating secondary indexes                        | ✅ `Database.CreateIndex`, single or composite, ascending or descending, backfilled⁵ |
 | Unique indexes enforced on insert                  | ✅ Including primary keys; null keys exempt |
 | Table definitions spanning several pages          | ✅ Read and written |
-| Reading complex columns (multi-value, memo history) | ✅ `Table.GetComplexValues` |
-| Reading complex columns (attachments)             | ❌ Flat-table rows decode with most columns null⁶ |
+| Reading complex columns (multi-value, attachments, memo history) | ✅ `Table.GetComplexValues` |
 | Memo / OLE long values                            | ✅      |
 | PropertyMap & MSysRelationships                   | ✅      |
 | Password-protected `.mdb` (Jet RC4 codec)         | ✅      |
@@ -178,10 +177,6 @@ expanded and re-emitted in full, and a full node splits under a new level, so tr
 past two levels — all three verified by querying the result through ACE. An insert is
 refused only when a key is too large for three to share a page, which is what splitting
 a node needs, and Jet's 255-byte key limit puts that out of reach.
-
-⁶ Not an attachment-specific fault: rows of a table mixing several fixed columns with OLE and
-Memo decode with most columns null, which `MSysResources`'s flat table shows too. The attachment
-reader is blocked behind it.
 
 ⁵ `db.CreateIndex("People", "ByName", "Name")` — up to 10 columns, ascending by default or
 descending via `IndexColumnSpec`, spliced into
