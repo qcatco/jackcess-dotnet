@@ -40,6 +40,12 @@ files the ACE engine wrote and querying the results back through
   variable area, as null. The encoder now takes the same flag and can emit a fixed-width type into
   the variable area, mirroring the branch the decoder gained. Every write test in this suite runs
   against Jet 4 `.mdb`, where no column disagrees with its type, which is how the two drifted apart.
+- **Long-value usage-map references were read one field early.** Access precedes them with a
+  2-byte count, which was being consumed as part of the first reference — turning row 2 of page 110
+  into page 0x6E0200. Writing a Memo then read far past the end of the file. Reading one never
+  noticed: that follows the reference held in the row itself and consults the map only to allocate.
+  The count is taken only when it matches the number of long-value columns, so files written before
+  this fix, which carry no count, still read.
 - **A column's storage class was inferred from its type instead of read from its flag.** Whether a
   value sits at a fixed offset or in the row's variable-length area is the column's own
   fixed-length flag; Access stores some numeric columns as variable-length, and the foreign key of
@@ -107,8 +113,9 @@ files the ACE engine wrote and querying the results back through
 - **`Table.AddComplexValue`** — appends one value to a complex column, filling both link columns:
   the foreign key back to the owning row and the flat row's own sequential id, which Access numbers
   across the whole flat table rather than per owning row. Works for multi-value fields and
-  attachments. Writing a Memo or OLE value into an `.accdb` still fails on a misparsed long-value
-  usage-map reference, which is pinned by a test.
+  attachments — the ACE engine reads both back from a file this library wrote into. Writing a Memo
+  or OLE value into an `.accdb` is not there yet: it completes and round-trips here, but Access
+  reads the value as empty.
 - **`PageFile.PagesRead`** — page reads are what an operation costs, and no correctness test can
   tell a seek from a scan.
 - **Reading complex columns** — multi-value fields, attachments and append-only memo history, via

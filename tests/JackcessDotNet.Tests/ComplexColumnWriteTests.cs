@@ -34,7 +34,8 @@ public sealed class ComplexColumnWriteTests : IDisposable
     }
 
     private static Row RowWithId(Table table, string id)
-        => table.ReadAllRows().Single(r => (string)r["id"]! == id);
+        => table.ReadAllRows().Single(
+            r => r.TryGetValue("id", out object? v) && (string?)v == id);
 
     [Fact]
     public void APlainRowCanBeInsertedIntoAnAccdb()
@@ -167,20 +168,32 @@ public sealed class ComplexColumnWriteTests : IDisposable
     }
 
     /// <summary>
-    /// Writing a Memo or OLE value into this .accdb still fails: the long-value usage-map reference
-    /// parsed out of its table definition is not a real page, so the writer reads far past the end
-    /// of the file. Pinned here so it announces itself when fixed — the complex-column writes above
-    /// do not go through that path.
+    /// A Memo value goes through the long-value store, which needs the column's usage map. Access
+    /// precedes those map references with a count that this reader used to consume as part of the
+    /// first reference, producing a page number in the millions, so the write read far past the end
+    /// of the file. Reading a Memo never noticed: that follows the reference held in the row itself
+    /// and consults the map only to allocate.
+    /// <para>
+    /// With the count skipped the write completes and round-trips <em>here</em> — but the ACE engine
+    /// reads the value back as empty, so it is not yet right, and this asserts only what is true.
+    /// The row itself is visible to Access; its long-value chain is not. Access also counts one row
+    /// fewer in this table than this library does after the write, which is likely the same defect
+    /// seen from the other side.
+    /// </para>
     /// </summary>
     [Fact]
-    public void WritingAMemoValueIntoAnAccdb_DoesNotWorkYet()
+    public void AMemoValueWrittenIntoAnAccdb_RoundTripsHereButIsNotYetReadableByAccess()
     {
         if (!TryStage()) return;
 
-        using var db = Database.Open(_path);
-        var t = db.GetTable("Table1");
+        string memo = "hello from the writer, " + new string('m', 400);
 
-        Assert.ThrowsAny<Exception>(
-            () => t.Insert(new Row { ["id"] = "with-memo", ["memo-data"] = "hello" }));
+        using (var db = Database.Open(_path))
+            db.GetTable("Table1").Insert(new Row { ["id"] = "with-memo", ["memo-data"] = memo });
+
+        using var reopened = Database.Open(_path);
+        Row written = RowWithId(reopened.GetTable("Table1"), "with-memo");
+
+        Assert.Equal(memo, written["memo-data"]);
     }
 }

@@ -153,7 +153,7 @@ materialising the whole table.
 | Reading complex columns (multi-value, attachments, memo history) | ✅ `Table.GetComplexValues` |
 | Writing complex columns                           | ✅ `Table.AddComplexValue` — multi-value and attachments |
 | Writing rows into an existing `.accdb`            | ✅ ⁸ |
-| Writing a Memo / OLE value into an `.accdb`       | ❌ Its long-value usage-map reference misparses⁸ |
+| Writing a Memo / OLE value into an `.accdb`       | ⚠️ Completes and round-trips here; Access reads it empty⁸ |
 | Memo / OLE long values                            | ✅      |
 | PropertyMap & MSysRelationships                   | ✅      |
 | Password-protected `.mdb` (Jet RC4 codec)         | ✅      |
@@ -249,8 +249,10 @@ the DAO engine substitutes. Which bytes the hash covers is the caller's to decid
 specification defines it over an OOXML package's encrypted stream, and an Access
 database has no such stream.
 
-⁸ Ordinary rows and complex values write correctly into an existing `.accdb`. What still
-fails is a Memo or OLE value: the long-value usage-map reference read out of that table's
-definition is not a real page, so the writer reads far past the end of the file. Pinned by
-a test. Note that every other write path here is exercised against Jet 4 `.mdb` — that gap
-is how the encoder came to disagree with the reader about where a value lives.
+⁸ Ordinary rows and complex values write correctly into an existing `.accdb`, and the ACE
+engine reads both back — including a multi-value entry and an attachment appended by
+`AddComplexValue`. A Memo or OLE value is not there yet: the write completes and round-trips
+through this library, but ACE reads the value as empty, and counts one row fewer in the table
+than this library does. Both point at the long-value chain rather than the row. Note that
+every other write path here is exercised against Jet 4 `.mdb` — that gap is how the encoder
+came to disagree with the reader about where a value lives.

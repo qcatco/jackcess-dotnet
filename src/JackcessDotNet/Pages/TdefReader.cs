@@ -154,6 +154,20 @@ internal static class TdefReader
         // one entry per long-value (Memo/OLE) column in column-number order.
         var lvalUmapPages = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         var lvalCols = columns.Where(c => c.DataType.IsLongValue()).ToList();
+
+        // Access precedes the references with a 2-byte count of them. Reading straight into the
+        // first reference takes its row byte plus two of its page bytes, which yields a page number
+        // in the millions — the table's usage map is page 110 and its long-value maps are rows 2
+        // and 3 of it, but the parse produced 0x6E0200. Nothing caught it because reading a Memo
+        // follows the reference stored in the row itself; the map is consulted only to allocate,
+        // so a wrong one broke writing alone.
+        //
+        // Tables this library writes emit no such count, so the field is taken only when it says
+        // what it should. That keeps files written before this fix readable, and is self-checking
+        // either way.
+        if (pos + 2 <= page.Length && ByteUtil.GetShort(page, pos) == lvalCols.Count)
+            pos += 2;
+
         for (int i = 0; i < lvalCols.Count && pos + 4 <= page.Length; i++)
         {
             // byte 0 = row number (always 0 for owned-pages bitmap, ignored here)
