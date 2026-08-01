@@ -7,7 +7,7 @@
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
     <RootNamespace>JackcessDotNet</RootNamespace>
     <AssemblyName>JackcessDotNet</AssemblyName>
-    <Version>3.0.0</Version>
+    <Version>3.0.1</Version>
     <Description>Pure .NET 10 library for reading and writing Microsoft Access (.mdb) database files. Port of the Jackcess Java library.</Description>
     <Authors>Mehran Ghanizadeh</Authors>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
@@ -40,7 +40,7 @@
       history; this short blurb tells consumers what's new in *this* release.
     -->
     <PackageReleaseNotes>
-      3.0.0 — Index maintenance is now complete and appending is no longer quadratic.
+      3.0.1 — Index maintenance is now complete and appending is no longer quadratic.
       Rows are threaded into every index rather than only the primary key, entry
       counts are kept current (Access answers COUNT(*) and MAX from an index),
       delete and update move or remove entries instead of leaving them behind, and
@@ -49,11 +49,13 @@
       index because Access does not order a TDEF's index-data blocks to match its
       slots. New: creating secondary indexes (ascending or descending, single or
       composite, backfilled), uniqueness enforced on insert, definitions spanning
-      several pages, and reading multi-value and memo-history complex columns.
-      Inserting now uses the table's free-space map instead of reading every page it
-      owns. Breaking: IndexWriter's per-index methods take an Index rather than an
-      ordinal, and Database.Create refuses .accdb rather than writing Jet 4 under an
-      ACE name. See CHANGELOG.md.
+      several pages, and reading, writing, updating and removing complex-column values
+      (multi-value, attachments, memo history). Inserting now uses the table's
+      free-space map instead of reading every page it owns, and space from deleted rows
+      is reclaimed. Breaking: IndexWriter's per-index methods take an Index rather than
+      an ordinal. Database.Create still accepts the ACE JetVersion members and still
+      writes a Jet 4 database for them, which Access opens whatever the extension.
+      See CHANGELOG.md.
     </PackageReleaseNotes>
   </PropertyGroup>
 

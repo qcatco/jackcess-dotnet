@@ -4,7 +4,12 @@ All notable changes to JackcessDotNet are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.0.0]
+## [3.0.1]
+
+3.0.0 was built but never published: it refused to create a database for the ACE `JetVersion`
+members, which broke callers that were doing so successfully on 2.2.0. That is fixed below, and
+the version is stepped so no machine can serve a cached 3.0.0 with the fault in it.
+
 
 Where 2.2.0 made a table this library *creates* readable by Access, this release makes
 appending to a table **Access already built** keep that table's indexes correct. Access
