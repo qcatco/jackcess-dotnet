@@ -47,7 +47,10 @@ internal sealed class LvalWriter
     {
         if (data is null) throw new ArgumentNullException(nameof(data));
 
-        int maxChunkRowSize = _format.DataPageInitialFreeSpace - JetFormat.SizeRowEntry;
+        // Access's own chunk rows are PageSize - 20 bytes (4076 for Jet4) -
+        // matches Java Jackcess MAX_LONG_VALUE_ROW_SIZE. Larger rows make ACE
+        // fail to materialize the value.
+        int maxChunkRowSize = _format.PageSize - 20;
         int totalLen = data.Length;
 
         if (totalLen <= maxChunkRowSize)
@@ -57,24 +60,67 @@ internal sealed class LvalWriter
             return BuildLvRef(totalLen, LvalTypeOtherPage, page, row);
         }
 
-        // Chunk chain - OTHER_PAGES. Written in reverse so each chunk knows its
-        // successor's address up front.
+        // Chunk chain - OTHER_PAGES, laid out the way Access does it: chunks in
+        // FORWARD order. Placement is planned up front (so each chunk can embed
+        // its successor's address): existing owned LVAL pages with enough free
+        // space are reused first - reclaiming space freed by deleted chains -
+        // and fresh pages are allocated only when nothing fits.
         int chunkCapacity = maxChunkRowSize - 4;
         int numChunks = (totalLen + chunkCapacity - 1) / chunkCapacity;
-        int nextPage = 0, nextRow = 0;
-        for (int i = numChunks - 1; i >= 0; i--)
+
+        var placements = new (int page, int row)[numChunks];
+        var simFree = new Dictionary<int, int>();
+        var simRows = new Dictionary<int, int>();
+
+        byte[] umapPage = _file.ReadPage(_umap.OwnedPage);
+        var owned = UsageMap.GetOwnedPages(umapPage, _umap.OwnedRow, _format, _file);
+        foreach (int pn in owned)
+        {
+            byte[] dp = _file.ReadPage(pn);
+            simFree[pn] = ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace);
+            simRows[pn] = ByteUtil.GetShort(dp, _format.OffsetDataNumRows);
+        }
+
+        for (int i = 0; i < numChunks; i++)
+        {
+            int len    = Math.Min(chunkCapacity, totalLen - i * chunkCapacity);
+            int needed = 4 + len + JetFormat.SizeRowEntry;
+
+            int target = -1;
+            foreach (int pn in owned)
+                if (simFree[pn] >= needed) { target = pn; break; }
+
+            if (target < 0)
+            {
+                target = _allocator.AllocateLvalPage();
+                umapPage = _file.ReadPage(_umap.OwnedPage);
+                UsageMap.AddPage(umapPage, _umap.OwnedRow, target, _format);
+                _file.WritePage(_umap.OwnedPage, umapPage);
+                owned.Add(target);
+                simFree[target] = _format.DataPageInitialFreeSpace;
+                simRows[target] = 0;
+            }
+
+            placements[i] = (target, simRows[target]);
+            simRows[target]++;
+            simFree[target] -= needed;
+        }
+
+        for (int i = 0; i < numChunks; i++)
         {
             int start = i * chunkCapacity;
             int len   = Math.Min(chunkCapacity, totalLen - start);
+            (int nextPage, int nextRow) = i + 1 < numChunks ? placements[i + 1] : (0, 0);
+
             var chunk = new byte[4 + len];
             chunk[0] = (byte)nextRow;
             chunk[1] = (byte) nextPage;
             chunk[2] = (byte)(nextPage >> 8);
             chunk[3] = (byte)(nextPage >> 16);
             Array.Copy(data, start, chunk, 4, len);
-            (nextPage, nextRow) = WriteChunkRow(chunk);
+            WriteChunkRowOnPage(placements[i].page, chunk);
         }
-        return BuildLvRef(totalLen, LvalTypeOtherPages, nextPage, nextRow);
+        return BuildLvRef(totalLen, LvalTypeOtherPages, placements[0].page, placements[0].row);
     }
 
     internal const int LvalTypeThisPage   = unchecked((int)0x80000000);
@@ -113,9 +159,9 @@ internal sealed class LvalWriter
 
         if (lvalPage < 0)
         {
-            // No page has room — allocate a fresh LVAL data page.
-            // tdefPageNumber = 0: LVAL pages are not owned by a user TDEF.
-            lvalPage = _allocator.AllocateDataPage(0);
+            // No page has room — allocate a fresh LVAL data page (carries the
+            // "LVAL" signature Access requires at bytes 4-7).
+            lvalPage = _allocator.AllocateLvalPage();
             umapPage = _file.ReadPage(_umap.OwnedPage);   // re-read after alloc
             UsageMap.AddPage(umapPage, _umap.OwnedRow, lvalPage, _format);
             _file.WritePage(_umap.OwnedPage, umapPage);
@@ -124,7 +170,15 @@ internal sealed class LvalWriter
             // so omitting it costs only reuse efficiency, not correctness.
         }
 
-        // Append the chunk row (rows are packed from the end of the page).
+        int rowIndex = WriteChunkRowOnPage(lvalPage, chunk);
+        return (lvalPage, rowIndex);
+    }
+
+    // Appends one chunk row to the GIVEN LVAL page; returns the row index.
+    private int WriteChunkRowOnPage(int lvalPage, byte[] chunk)
+    {
+        int needed = chunk.Length + JetFormat.SizeRowEntry;
+
         byte[] page      = _file.ReadPage(lvalPage);
         int    rowCount  = ByteUtil.GetShort(page, _format.OffsetDataNumRows);
         int    freeSpace = ByteUtil.GetShort(page, JetFormat.OffsetDataFreeSpace);
@@ -140,7 +194,7 @@ internal sealed class LvalWriter
         ByteUtil.PutShort(page, JetFormat.OffsetDataFreeSpace, (short)(freeSpace - needed));
 
         _file.WritePage(lvalPage, page);
-        return (lvalPage, rowCount);   // rowCount was the 0-based index before increment
+        return rowCount;   // rowCount was the 0-based index before increment
     }
 
     private static byte[] BuildOtherPageLvRef(int totalLen, int page, int row)

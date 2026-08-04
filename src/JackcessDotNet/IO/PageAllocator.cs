@@ -40,6 +40,31 @@ public sealed class PageAllocator
     }
 
     /// <summary>
+    /// Allocates a new LVAL data page and returns its page number. LVAL pages
+    /// share the data-page layout but carry the ASCII signature "LVAL" at bytes
+    /// 4-7 (where ordinary data pages store their owning TDEF page number).
+    /// Access validates this signature when following long-value references —
+    /// without it, ACE rejects the whole database as corrupt.
+    /// </summary>
+    public int AllocateLvalPage()
+    {
+        var format     = _file.Format;
+        int pageNumber = AllocatePage();
+        var page       = new byte[format.PageSize];
+
+        page[0] = JetFormat.PageTypeData;
+        page[1] = 0x01;
+        ByteUtil.PutShort(page, JetFormat.OffsetDataFreeSpace, (short)format.DataPageInitialFreeSpace);
+        page[4] = (byte)'L';
+        page[5] = (byte)'V';
+        page[6] = (byte)'A';
+        page[7] = (byte)'L';
+
+        _file.WritePage(pageNumber, page);
+        return pageNumber;
+    }
+
+    /// <summary>
     /// Allocates a new Usage-Map page (type 0x05) with two empty inline maps
     /// (owned-pages map at row 0, free-space map at row 1), and returns its page number.
     /// </summary>

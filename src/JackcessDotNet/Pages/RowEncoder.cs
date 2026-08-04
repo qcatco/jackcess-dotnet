@@ -266,11 +266,14 @@ public sealed class RowEncoder
                     : Util.ByteUtil.EncodeText(text);
                 // Small values are stored inline in the row (THIS_PAGE), like
                 // real Access and upstream Jackcess; only genuinely large
-                // values go to LVAL pages.
+                // values go to LVAL pages. LVAL-bound text is stored as plain
+                // UTF-16LE without the 0xFF 0xFE compression marker - that is
+                // what Access itself writes for chained memos, and ACE fails to
+                // decode compressed content spread across LVAL chunks.
                 if (textBytes.Length > InlineLvalThreshold
                     && _lvalWriters is not null
                     && _lvalWriters.TryGetValue(col.Name, out var memoWriter))
-                    return memoWriter.Write(textBytes);
+                    return memoWriter.Write(System.Text.Encoding.Unicode.GetBytes(text));
                 return BuildInlineLvRef(textBytes);
             }
             case DataType.Ole:
