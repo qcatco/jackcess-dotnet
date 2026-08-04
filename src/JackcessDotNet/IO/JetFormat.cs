@@ -114,7 +114,11 @@ public sealed class JetFormat
     private static readonly bool _encodingsRegistered = InitEncodings();
     private static bool InitEncodings()
     {
+#if !NETFRAMEWORK
+        // .NET Framework has legacy code pages (cp1252 etc.) in-box; the
+        // CodePages provider package is only needed on .NET (Core).
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+#endif
         return true;
     }
 
