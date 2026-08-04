@@ -147,7 +147,7 @@ internal sealed class RowDecoder
         return col.DataType switch
         {
             DataType.Text   => ByteUtil.DecodeText(rowBytes, varStart, varLen, _format),
-            DataType.Binary => rowBytes[varStart..varEnd],
+            DataType.Binary => rowBytes.Slice(varStart, varEnd),
             DataType.Memo   => DecodeMemoLvRef(rowBytes, varStart, varLen),
             DataType.Ole    => DecodeOleLvRef (rowBytes, varStart, varLen),
             _               => null
@@ -244,7 +244,7 @@ internal sealed class RowDecoder
             DataType.Double       => ByteUtil.GetDouble(row, offset),
             DataType.ShortDateTime=> DecodeShortDateTime(row, offset),
             DataType.Money        => Math.Round((decimal)ByteUtil.GetLong(row, offset) / 10000m, 4),
-            DataType.Guid         => new Guid(row[offset..(offset + 16)]),
+            DataType.Guid         => new Guid(row.Slice(offset, offset + 16)),
         DataType.Numeric      => DecodeNumeric(row, offset, col),
         _                     => null
     };

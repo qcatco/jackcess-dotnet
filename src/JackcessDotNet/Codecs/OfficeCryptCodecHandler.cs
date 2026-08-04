@@ -365,7 +365,7 @@ public sealed class OfficeCryptCodecHandler : ICodecHandler
                 testHash = FixToLength(testHash, padded, 0);
             }
 
-            return CryptographicOperations.FixedTimeEquals(storedHash, testHash);
+            return CryptoCompat.FixedTimeEquals(storedHash, testHash);
         }
 
         public static byte[] DecryptPage(
@@ -660,7 +660,7 @@ public sealed class OfficeCryptCodecHandler : ICodecHandler
 
             byte[] testHash = FixToLength(HashBytes("SHA1", verifier, Array.Empty<byte>()),
                                           _info.VerifierHashSize, 0);
-            return CryptographicOperations.FixedTimeEquals(storedHash, testHash);
+            return CryptoCompat.FixedTimeEquals(storedHash, testHash);
         }
 
         public byte[] DecryptPage(byte[] password, byte[] encodingKey, byte[] cipherPage, int pageNumber)
@@ -773,7 +773,7 @@ public sealed class OfficeCryptCodecHandler : ICodecHandler
             storedHash = FixToLength(storedHash, _info.VerifierHashSize, 0);
             byte[] testHash = FixToLength(HashBytes("SHA1", verifier, Array.Empty<byte>()),
                                           _info.VerifierHashSize, 0);
-            return CryptographicOperations.FixedTimeEquals(storedHash, testHash);
+            return CryptoCompat.FixedTimeEquals(storedHash, testHash);
         }
 
         public byte[] CryptPage(byte[] password, byte[] encodingKey, byte[] page, int pageNumber)
@@ -868,7 +868,7 @@ public sealed class OfficeCryptCodecHandler : ICodecHandler
 
     /// <summary>
     /// Hashes <c>a || b</c> with the named algorithm. Uses .NET 8 one-shot
-    /// static methods (<see cref="SHA512.HashData(System.ReadOnlySpan{byte})"/>
+    /// static methods (<see cref="CryptoCompat.Sha512(System.ReadOnlySpan{byte})"/>
     /// etc.) so the spin loop's 100,000 iterations don't pay for HashAlgorithm
     /// instance allocation per pass and no TransformBlock state is involved.
     /// </summary>
@@ -890,11 +890,11 @@ public sealed class OfficeCryptCodecHandler : ICodecHandler
     private static byte[] HashOneShot(string algorithm, byte[] data) =>
         algorithm.ToUpperInvariant().Replace("-", "").Replace("_", "") switch
         {
-            "SHA1"      => SHA1.HashData(data),
-            "SHA256"    => SHA256.HashData(data),
-            "SHA384"    => SHA384.HashData(data),
-            "SHA512"    => SHA512.HashData(data),
-            "MD5"       => MD5.HashData(data),
+            "SHA1"      => CryptoCompat.Sha1(data),
+            "SHA256"    => CryptoCompat.Sha256(data),
+            "SHA384"    => CryptoCompat.Sha384(data),
+            "SHA512"    => CryptoCompat.Sha512(data),
+            "MD5"       => CryptoCompat.Md5(data),
             _ => throw new NotSupportedException(
                    $"Hash algorithm '{algorithm}' is not supported by the Office Crypt codec port. " +
                    "Supported: SHA1, SHA256, SHA384, SHA512, MD5."),

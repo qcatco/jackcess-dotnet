@@ -38,7 +38,11 @@ internal static class ByteUtil
         => BitConverter.Int64BitsToDouble(GetLong(buf, offset));
 
     public static float GetFloat(byte[] buf, int offset)
+#if NETFRAMEWORK
+        => System.Buffers.Binary.BinaryPrimitivesCompat.Int32BitsToSingle(GetInt(buf, offset));
+#else
         => BitConverter.Int32BitsToSingle(GetInt(buf, offset));
+#endif
 
     // ── Write helpers ─────────────────────────────────────────────────────────
 
@@ -90,7 +94,11 @@ internal static class ByteUtil
         => PutLong(buf, offset, BitConverter.DoubleToInt64Bits(value));
 
     public static void PutFloat(byte[] buf, int offset, float value)
+#if NETFRAMEWORK
+        => PutInt(buf, offset, System.Buffers.Binary.BinaryPrimitivesCompat.SingleToInt32Bits(value));
+#else
         => PutInt(buf, offset, BitConverter.SingleToInt32Bits(value));
+#endif
 
     public static void PutBytes(byte[] buf, int offset, byte[] src)
         => Array.Copy(src, 0, buf, offset, src.Length);
@@ -138,12 +146,12 @@ internal static class ByteUtil
         if (length >= 2 && data[offset] == 0xFF && data[offset + 1] == 0xFE)
         {
             // Access-format compressed: 0xFF 0xFE + Latin-1 bytes.
-            return Encoding.Latin1.GetString(data, offset + 2, length - 2);
+            return EncodingCompat.Latin1.GetString(data, offset + 2, length - 2);
         }
         if (data[offset] == 0xFF)
         {
             // Legacy single-byte marker (text we wrote ourselves before the fix).
-            return Encoding.Latin1.GetString(data, offset + 1, length - 1);
+            return EncodingCompat.Latin1.GetString(data, offset + 1, length - 1);
         }
         return Encoding.Unicode.GetString(data, offset, length);
     }
