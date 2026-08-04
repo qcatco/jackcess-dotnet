@@ -477,11 +477,14 @@ public sealed class Database : IDisposable
 
         // 3. Allocate a LVAL usage-map page for each Memo/OLE column (must happen before
         //    Serialize so the page numbers can be embedded in the TDEF).
-        var lvalUmaps = new System.Collections.Generic.Dictionary<string, int>(
+        var lvalUmaps = new System.Collections.Generic.Dictionary<string, LvalUmapRef>(
             System.StringComparer.OrdinalIgnoreCase);
         foreach (var col in columns)
             if (col.DataType.IsLongValue())
-                lvalUmaps[col.Name] = _allocator.AllocateUmapPage();
+            {
+                int lvalUmapPage = _allocator.AllocateUmapPage();
+                lvalUmaps[col.Name] = new LvalUmapRef(lvalUmapPage, 0, lvalUmapPage, 1);
+            }
 
         // 4. Build the TableDefinition (column numbers + var-table indices will be assigned
         //    by Serialize, but PK info must be set BEFORE Serialize so the index column

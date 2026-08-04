@@ -26,7 +26,7 @@ internal static class TdefReader
         int OwnedPagesUmapRow,
         int FreeSpaceUmapPage,
         int FreeSpaceUmapRow,
-        IReadOnlyDictionary<string, int> LvalColumnUmapPages,
+        IReadOnlyDictionary<string, LvalUmapRef> LvalColumnUmapPages,
         IReadOnlyList<Index> Indexes);
 
     /// <summary>Number of slots in an index column block's column array (always 10 in real Access).</summary>
@@ -142,17 +142,26 @@ internal static class TdefReader
             indexes = ParseIndexes(page, format, ref pos, numIndexes, numIndexSlots, columns);
         }
 
-        // Read LVAL usage-map refs (4 bytes each: 1-byte row + 3-byte page),
-        // one entry per long-value (Memo/OLE) column in column-number order.
-        var lvalUmapPages = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var lvalCols = columns.Where(c => c.DataType.IsLongValue()).ToList();
-        for (int i = 0; i < lvalCols.Count && pos + 4 <= page.Length; i++)
+        // Read LVAL usage-map refs. Real format (matches Java Jackcess):
+        // 10 bytes per entry - [colNum:2][ownedRow:1][ownedPage:3][freeRow:1]
+        // [freePage:3] - terminated by colNum == 0xFFFF. Entries are matched to
+        // columns BY COLUMN NUMBER, not by order. (The previous 4-byte parse
+        // read garbage page numbers out of real Access TDEFs, corrupting every
+        // memo write into such files.)
+        var lvalUmapPages = new Dictionary<string, LvalUmapRef>(StringComparer.OrdinalIgnoreCase);
+        var lvalColsByNumber = columns.Where(c => c.DataType.IsLongValue())
+                                      .ToDictionary(c => (int)c.ColumnNumber);
+        while (lvalColsByNumber.Count > 0 && pos + 10 <= page.Length)
         {
-            // byte 0 = row number (always 0 for owned-pages bitmap, ignored here)
-            int lvalPage = ByteUtil.Get3ByteInt(page, pos + 1);
-            pos += 4;
-            if (lvalPage > 0)
-                lvalUmapPages[lvalCols[i].Name] = lvalPage;
+            int colNum = ByteUtil.GetUShort(page, pos);
+            if (colNum == 0xFFFF) break;
+            int lvOwnedRow  = page[pos + 2];
+            int lvOwnedPage = ByteUtil.Get3ByteInt(page, pos + 3);
+            int lvFreeRow   = page[pos + 6];
+            int lvFreePage  = ByteUtil.Get3ByteInt(page, pos + 7);
+            pos += 10;
+            if (lvalColsByNumber.TryGetValue(colNum, out var lvalCol) && lvOwnedPage > 0)
+                lvalUmapPages[lvalCol.Name] = new LvalUmapRef(lvOwnedPage, lvOwnedRow, lvFreePage, lvFreeRow);
         }
 
         return new TdefInfo(

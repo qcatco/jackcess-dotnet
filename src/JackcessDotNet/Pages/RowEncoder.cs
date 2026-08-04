@@ -227,15 +227,24 @@ public sealed class RowEncoder
     // ── Long-value helpers ────────────────────────────────────────────────────
 
     /// <summary>
-    /// Builds a THIS_PAGE (0x80) inline LvRef: [4-byte data-length LE][0x80][data bytes].
-    /// The entire LvRef is stored in the row's variable-length area.
+    /// Builds a THIS_PAGE inline LvRef in the REAL Jet format (matches Java
+    /// Jackcess / what ACE writes): the type lives in the top two bits of the
+    /// 32-bit length ([lengthWithFlags:4][lval_dp:4][unknown:4][data]).
     /// </summary>
+    /// <summary>
+    /// Long values up to this many bytes are stored inline in the parent row
+    /// (THIS_PAGE) instead of on LVAL pages - conservative enough that a row
+    /// with one inline memo plus ordinary columns stays under Jet4's ~4060-byte
+    /// row limit.
+    /// </summary>
+    internal const int InlineLvalThreshold = 1024;
+
     private static byte[] BuildInlineLvRef(byte[] data)
     {
-        var lvRef = new byte[5 + data.Length];
-        Util.ByteUtil.PutInt(lvRef, 0, data.Length);
-        lvRef[4] = 0x80;                                     // THIS_PAGE marker
-        Array.Copy(data, 0, lvRef, 5, data.Length);
+        var lvRef = new byte[12 + data.Length];
+        Util.ByteUtil.PutInt(lvRef, 0, unchecked(data.Length | (int)0x80000000)); // THIS_PAGE
+        // bytes 4..11: lval_dp + unknown, left zero
+        Array.Copy(data, 0, lvRef, 12, data.Length);
         return lvRef;
     }
 
@@ -255,7 +264,10 @@ public sealed class RowEncoder
                 byte[] textBytes = _format.Version == JetVersion.Jet3
                     ? _format.TextEncoding.GetBytes(text)
                     : Util.ByteUtil.EncodeText(text);
-                if (textBytes.Length > 0
+                // Small values are stored inline in the row (THIS_PAGE), like
+                // real Access and upstream Jackcess; only genuinely large
+                // values go to LVAL pages.
+                if (textBytes.Length > InlineLvalThreshold
                     && _lvalWriters is not null
                     && _lvalWriters.TryGetValue(col.Name, out var memoWriter))
                     return memoWriter.Write(textBytes);
@@ -265,7 +277,7 @@ public sealed class RowEncoder
             {
                 if (value is not byte[] oleBytes)
                     throw new InvalidOperationException("OLE column value must be a byte array.");
-                if (oleBytes.Length > 0
+                if (oleBytes.Length > InlineLvalThreshold
                     && _lvalWriters is not null
                     && _lvalWriters.TryGetValue(col.Name, out var oleWriter))
                     return oleWriter.Write(oleBytes);

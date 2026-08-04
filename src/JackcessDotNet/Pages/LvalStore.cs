@@ -22,74 +22,76 @@ internal sealed class LvalWriter
 {
     private readonly PageFile      _file;
     private readonly PageAllocator _allocator;
-    private readonly int           _umapPageNumber;   // LVAL column's umap page (row 0 = owned pages)
+    private readonly LvalUmapRef   _umap;   // owned/free usage maps for this LVAL column
     private readonly JetFormat     _format;
 
-    public LvalWriter(PageFile file, PageAllocator allocator, int umapPageNumber)
+    public LvalWriter(PageFile file, PageAllocator allocator, LvalUmapRef umap)
     {
-        _file           = file      ?? throw new ArgumentNullException(nameof(file));
-        _allocator      = allocator ?? throw new ArgumentNullException(nameof(allocator));
-        _umapPageNumber = umapPageNumber;
-        _format         = file.Format;
+        _file      = file      ?? throw new ArgumentNullException(nameof(file));
+        _allocator = allocator ?? throw new ArgumentNullException(nameof(allocator));
+        _umap      = umap;
+        _format    = file.Format;
     }
 
     /// <summary>
-    /// Writes <paramref name="data"/> across one or more LVAL pages (in reverse-chunk order)
-    /// and returns the 9-byte OTHER_PAGE LvRef to store in the parent row.
+    /// Writes <paramref name="data"/> to LVAL storage and returns the 12-byte
+    /// LvRef (REAL Jet format, matching Java Jackcess / ACE):
+    ///   [lengthWithFlags:4 LE]  type in top two bits:
+    ///                             0x40000000 OTHER_PAGE  - single chunk row
+    ///                             0x00000000 OTHER_PAGES - chunk chain
+    ///   [firstRow:1][firstPage:3 LE][unknown:4 = 0]
+    /// OTHER_PAGE chunk rows contain raw data. OTHER_PAGES chunk rows are
+    /// [nextRow:1][nextPage:3][payload], nextPage == 0 terminating the chain.
     /// </summary>
     public byte[] Write(byte[] data)
     {
         if (data is null) throw new ArgumentNullException(nameof(data));
 
-        // Max bytes of payload data per chunk row.
-        // A fresh LVAL page has DataPageInitialFreeSpace bytes free.
-        // Inserting a row costs: rowBytes + SizeRowEntry (slot header).
-        // The row itself is: chunkDataCapacity + 4 (chain suffix).
-        int maxChunkRowSize   = _format.DataPageInitialFreeSpace - JetFormat.SizeRowEntry;
-        int chunkDataCapacity = maxChunkRowSize - 4;
+        int maxChunkRowSize = _format.DataPageInitialFreeSpace - JetFormat.SizeRowEntry;
+        int totalLen = data.Length;
 
-        int totalLen  = data.Length;
-        int numChunks = totalLen == 0 ? 1
-                                      : (totalLen + chunkDataCapacity - 1) / chunkDataCapacity;
-
-        // Compute per-chunk slice descriptors.
-        var chunkStart = new int[numChunks];
-        var chunkLen   = new int[numChunks];
-        for (int i = 0; i < numChunks; i++)
+        if (totalLen <= maxChunkRowSize)
         {
-            chunkStart[i] = i * chunkDataCapacity;
-            chunkLen[i]   = Math.Min(chunkDataCapacity, totalLen - chunkStart[i]);
+            // Single chunk - OTHER_PAGE. The chunk row is the raw data.
+            (int page, int row) = WriteChunkRow(data);
+            return BuildLvRef(totalLen, LvalTypeOtherPage, page, row);
         }
 
-        // Write chunks in REVERSE order so each chunk can embed its successor's address.
+        // Chunk chain - OTHER_PAGES. Written in reverse so each chunk knows its
+        // successor's address up front.
+        int chunkCapacity = maxChunkRowSize - 4;
+        int numChunks = (totalLen + chunkCapacity - 1) / chunkCapacity;
         int nextPage = 0, nextRow = 0;
         for (int i = numChunks - 1; i >= 0; i--)
         {
-            bool isLast = (i == numChunks - 1);
-            int  dLen   = chunkLen[i];
-            var  chunk  = new byte[dLen + 4];
-
-            Array.Copy(data, chunkStart[i], chunk, 0, dLen);
-
-            if (isLast)
-            {
-                chunk[dLen    ] = 0xFF;
-                chunk[dLen + 1] = 0xFF;
-                chunk[dLen + 2] = 0xFF;
-                chunk[dLen + 3] = 0xFF;
-            }
-            else
-            {
-                chunk[dLen    ] = (byte) nextPage;
-                chunk[dLen + 1] = (byte)(nextPage >>  8);
-                chunk[dLen + 2] = (byte)(nextPage >> 16);
-                chunk[dLen + 3] = (byte) nextRow;
-            }
-
+            int start = i * chunkCapacity;
+            int len   = Math.Min(chunkCapacity, totalLen - start);
+            var chunk = new byte[4 + len];
+            chunk[0] = (byte)nextRow;
+            chunk[1] = (byte) nextPage;
+            chunk[2] = (byte)(nextPage >> 8);
+            chunk[3] = (byte)(nextPage >> 16);
+            Array.Copy(data, start, chunk, 4, len);
             (nextPage, nextRow) = WriteChunkRow(chunk);
         }
+        return BuildLvRef(totalLen, LvalTypeOtherPages, nextPage, nextRow);
+    }
 
-        return BuildOtherPageLvRef(totalLen, nextPage, nextRow);
+    internal const int LvalTypeThisPage   = unchecked((int)0x80000000);
+    internal const int LvalTypeOtherPage  = 0x40000000;
+    internal const int LvalTypeOtherPages = 0x00000000;
+    internal const int LvalLengthMask     = 0x3FFFFFFF;
+
+    private static byte[] BuildLvRef(int totalLen, int typeFlags, int page, int row)
+    {
+        var lvRef = new byte[12];
+        ByteUtil.PutInt(lvRef, 0, unchecked(totalLen | typeFlags));
+        lvRef[4] = (byte)row;
+        lvRef[5] = (byte) page;
+        lvRef[6] = (byte)(page >> 8);
+        lvRef[7] = (byte)(page >> 16);
+        // bytes 8..11 unknown, left zero
+        return lvRef;
     }
 
     // Appends one chunk row to an available LVAL data page; returns (pageNum, rowIndex).
@@ -98,8 +100,8 @@ internal sealed class LvalWriter
         int needed = chunk.Length + JetFormat.SizeRowEntry;
 
         // Find an existing LVAL page with enough room.
-        byte[] umapPage  = _file.ReadPage(_umapPageNumber);
-        var    ownedList = UsageMap.GetOwnedPages(umapPage, 0 /* OwnedPagesRow */, _format, _file);
+        byte[] umapPage  = _file.ReadPage(_umap.OwnedPage);
+        var    ownedList = UsageMap.GetOwnedPages(umapPage, _umap.OwnedRow, _format, _file);
         int    lvalPage  = -1;
 
         foreach (int pn in ownedList)
@@ -114,9 +116,12 @@ internal sealed class LvalWriter
             // No page has room — allocate a fresh LVAL data page.
             // tdefPageNumber = 0: LVAL pages are not owned by a user TDEF.
             lvalPage = _allocator.AllocateDataPage(0);
-            umapPage = _file.ReadPage(_umapPageNumber);   // re-read after alloc
-            UsageMap.AddPage(umapPage, 0 /* OwnedPagesRow */, lvalPage, _format);
-            _file.WritePage(_umapPageNumber, umapPage);
+            umapPage = _file.ReadPage(_umap.OwnedPage);   // re-read after alloc
+            UsageMap.AddPage(umapPage, _umap.OwnedRow, lvalPage, _format);
+            _file.WritePage(_umap.OwnedPage, umapPage);
+            // TODO: also track the page in the free-space umap (_umap.FreePage/
+            // FreeRow) like real Access; readers follow direct LvRef pointers,
+            // so omitting it costs only reuse efficiency, not correctness.
         }
 
         // Append the chunk row (rows are packed from the end of the page).
@@ -166,13 +171,16 @@ internal sealed class LvalReader
     }
 
     /// <summary>
-    /// Reconstructs the full byte array for the LVAL value whose first chunk starts at
-    /// (<paramref name="lvalPage"/>, <paramref name="lvalRow"/>).
-    /// <paramref name="totalLen"/> is the expected byte count from the parent-row LvRef.
+    /// Reconstructs the LVAL value starting at (<paramref name="lvalPage"/>,
+    /// <paramref name="lvalRow"/>). For OTHER_PAGE (<paramref name="chained"/>
+    /// false) the single chunk row IS the data; for OTHER_PAGES each chunk row
+    /// is [nextRow:1][nextPage:3][payload] with nextPage == 0 ending the chain.
     /// </summary>
-    public byte[] Read(int lvalPage, int lvalRow, int totalLen)
+    public byte[] Read(int lvalPage, int lvalRow, int totalLen, bool chained)
     {
-        var result  = new byte[totalLen];
+        var result = new byte[totalLen];
+        if (totalLen == 0) return result;
+
         int written = 0;
         int curPage = lvalPage;
         int curRow  = lvalRow;
@@ -189,25 +197,25 @@ internal sealed class LvalReader
             (int rowStart, int rowEnd) = GetRowBounds(page, curRow, rowCount);
             int rowLen = rowEnd - rowStart;
 
+            if (!chained)
+            {
+                Array.Copy(page, rowStart, result, 0, Math.Min(rowLen, totalLen));
+                break;
+            }
+
             if (rowLen < 4)
                 throw new InvalidOperationException(
-                    $"LVAL row [{curPage},{curRow}] is only {rowLen} bytes (minimum 4 required).");
+                    $"LVAL chain row [{curPage},{curRow}] is only {rowLen} bytes (minimum 4 required).");
 
-            int dataLen = rowLen - 4;
-            int copyLen = Math.Min(dataLen, totalLen - written);
-            Array.Copy(page, rowStart, result, written, copyLen);
+            int nextRow  = page[rowStart];
+            int nextPage = page[rowStart + 1] | (page[rowStart + 2] << 8) | (page[rowStart + 3] << 16);
+            int copyLen  = Math.Min(rowLen - 4, totalLen - written);
+            Array.Copy(page, rowStart + 4, result, written, copyLen);
             written += copyLen;
 
-            // Inspect the 4-byte chain suffix at rowStart + dataLen.
-            int sfx = rowStart + dataLen;
-            bool isLast = page[sfx    ] == 0xFF
-                       && page[sfx + 1] == 0xFF
-                       && page[sfx + 2] == 0xFF
-                       && page[sfx + 3] == 0xFF;
-            if (isLast) break;
-
-            curPage = page[sfx    ] | (page[sfx + 1] << 8) | (page[sfx + 2] << 16);
-            curRow  = page[sfx + 3];
+            if (nextPage == 0) break;
+            curPage = nextPage;
+            curRow  = nextRow;
         }
 
         return result;
@@ -253,11 +261,13 @@ internal sealed class LvalFree
     }
 
     /// <summary>
-    /// Marks every chunk in the LVAL chain starting at
-    /// (<paramref name="lvalPage"/>, <paramref name="lvalRow"/>) as deleted,
-    /// and attempts tail-compaction on each affected page.
+    /// Marks every chunk starting at (<paramref name="lvalPage"/>,
+    /// <paramref name="lvalRow"/>) as deleted and tail-compacts each page.
+    /// <paramref name="chained"/> selects OTHER_PAGES chain walking
+    /// ([nextRow:1][nextPage:3] prefix, nextPage == 0 ends) vs a single
+    /// OTHER_PAGE chunk.
     /// </summary>
-    public void FreeChain(int lvalPage, int lvalRow)
+    public void FreeChain(int lvalPage, int lvalRow, bool chained)
     {
         int curPage = lvalPage;
         int curRow  = lvalRow;
@@ -271,18 +281,15 @@ internal sealed class LvalFree
 
             (int rowStart, int rowEnd) = GetRowBounds(page, curRow, rowCount);
             int rowLen = rowEnd - rowStart;
-            if (rowLen < 4) break;
 
-            // Read chain suffix BEFORE modifying the page.
-            int  dataLen = rowLen - 4;
-            int  sfx     = rowStart + dataLen;
-            bool isLast  = page[sfx    ] == 0xFF && page[sfx + 1] == 0xFF
-                        && page[sfx + 2] == 0xFF && page[sfx + 3] == 0xFF;
-            int nextPage = 0, nextRow = 0;
-            if (!isLast)
+            // Read chain prefix BEFORE modifying the page.
+            int  nextPage = 0, nextRow = 0;
+            bool hasNext  = false;
+            if (chained && rowLen >= 4)
             {
-                nextPage = page[sfx    ] | (page[sfx + 1] << 8) | (page[sfx + 2] << 16);
-                nextRow  = page[sfx + 3];
+                nextRow  = page[rowStart];
+                nextPage = page[rowStart + 1] | (page[rowStart + 2] << 8) | (page[rowStart + 3] << 16);
+                hasNext  = nextPage != 0;
             }
 
             // Mark this chunk's slot as deleted.
@@ -290,14 +297,11 @@ internal sealed class LvalFree
             ByteUtil.PutUShort(page, slotOff,
                 (ushort)(ByteUtil.GetUShort(page, slotOff) | 0x8000u));
 
-            // Compact the tail: pop any deleted rows from the end of the slot table,
-            // returning their space to the free area.
             TrimDeletedTail(page);
 
             _file.WritePage(curPage, page);
 
-            if (isLast) break;
-
+            if (!hasNext) break;
             curPage = nextPage;
             curRow  = nextRow;
         }

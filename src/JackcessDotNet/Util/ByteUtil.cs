@@ -119,8 +119,9 @@ internal static class ByteUtil
     {
         // Try compressed encoding when all chars fit in Latin-1.
         // Access uses a 2-byte marker (0xFF 0xFE) so the decoder can distinguish
-        // compressed text from uncompressed UTF-16LE.
-        bool canCompress = value.All(c => c <= 0xFF);
+        // compressed text from uncompressed UTF-16LE. NUL is excluded: inside a
+        // compressed stream 0x00 is the segment-mode toggle, not a character.
+        bool canCompress = value.All(c => c >= 0x01 && c <= 0xFF);
         if (canCompress)
         {
             var bytes = new byte[value.Length + 2];
@@ -134,26 +135,65 @@ internal static class ByteUtil
     }
 
     /// <summary>
-    /// Jet4 text decoder. Real Access prefixes compressed text with the 2-byte
-    /// marker 0xFF 0xFE and stores chars as single Latin-1 bytes. Uncompressed
-    /// text is stored as UTF-16LE without a marker. The older 1-byte 0xFF prefix
-    /// is also recognised so the format remains compatible with text written by
-    /// earlier versions of this library.
+    /// Jet4 text decoder. The 0xFF 0xFE marker introduces Jet's compressed text
+    /// format: the stream starts in compressed mode (one byte per char, high
+    /// byte implicitly 0x00) and every 0x00 byte TOGGLES between compressed and
+    /// uncompressed (UTF-16LE) segments. Real Access routinely writes mixed
+    /// streams (e.g. an ASCII prefix compressed, then Japanese uncompressed),
+    /// so decoding everything after the marker as Latin-1 corrupts non-Latin1
+    /// text. Algorithm ported from Java Jackcess ColumnImpl.decodeTextValue.
+    /// Text without the marker is plain UTF-16LE.
     /// </summary>
     public static string DecodeText(byte[] data, int offset, int length)
     {
         if (length == 0) return string.Empty;
         if (length >= 2 && data[offset] == 0xFF && data[offset + 1] == 0xFE)
         {
-            // Access-format compressed: 0xFF 0xFE + Latin-1 bytes.
-            return EncodingCompat.Latin1.GetString(data, offset + 2, length - 2);
+            var text = new StringBuilder(length);
+            int end = offset + length;
+            int segStart = offset + 2;
+            int pos = segStart;
+            bool inCompressedMode = true;
+            while (pos < end)
+            {
+                if (data[pos] == 0x00)
+                {
+                    DecodeTextSegment(data, segStart, pos, inCompressedMode, text);
+                    inCompressedMode = !inCompressedMode;
+                    pos++;
+                    segStart = pos;
+                }
+                else
+                {
+                    pos++;
+                }
+            }
+            DecodeTextSegment(data, segStart, end, inCompressedMode, text);
+            return text.ToString();
         }
-        if (data[offset] == 0xFF)
+        if (data[offset] == 0xFF && data[offset + 1] != 0x00)
         {
-            // Legacy single-byte marker (text we wrote ourselves before the fix).
+            // Legacy single-byte marker (text written by earlier versions of
+            // this library). The second-byte guard keeps genuine UTF-16LE that
+            // begins with U+00FF ('ÿ' encodes as FF 00) out of this branch.
             return EncodingCompat.Latin1.GetString(data, offset + 1, length - 1);
         }
         return Encoding.Unicode.GetString(data, offset, length);
+    }
+
+    private static void DecodeTextSegment(byte[] data, int start, int end, bool compressed, StringBuilder text)
+    {
+        if (end <= start) return;
+        if (compressed)
+        {
+            // Each byte is a UTF-16 code unit with an implicit 0x00 high byte.
+            for (int i = start; i < end; i++)
+                text.Append((char)data[i]);
+        }
+        else
+        {
+            text.Append(Encoding.Unicode.GetString(data, start, end - start));
+        }
     }
 
     /// <summary>

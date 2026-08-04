@@ -55,10 +55,10 @@ public sealed class DataPageWriter
         foreach (var col in tableDef.Columns)
         {
             if (col.DataType.IsLongValue() &&
-                tableDef.LvalColumnUmapPages.TryGetValue(col.Name, out int umapPage))
+                tableDef.LvalColumnUmapPages.TryGetValue(col.Name, out var umapRef))
             {
                 lvalWriters ??= new Dictionary<string, LvalWriter>(StringComparer.OrdinalIgnoreCase);
-                lvalWriters[col.Name] = new LvalWriter(_file, _allocator, umapPage);
+                lvalWriters[col.Name] = new LvalWriter(_file, _allocator, umapRef);
             }
         }
 
@@ -320,8 +320,8 @@ public sealed class DataPageWriter
     private void FreeRowLvalChains(byte[] rowBytes, RowDecoder decoder)
     {
         var lvalFree = new LvalFree(_file);
-        foreach (var (lvalPage, lvalRow) in decoder.GetOtherPageLvRefs(rowBytes))
-            lvalFree.FreeChain(lvalPage, lvalRow);
+        foreach (var (lvalPage, lvalRow, chained) in decoder.GetOtherPageLvRefs(rowBytes))
+            lvalFree.FreeChain(lvalPage, lvalRow, chained);
     }
 
     private static bool PrimaryKeysEqual(object? stored, object? requested)

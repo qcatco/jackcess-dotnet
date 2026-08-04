@@ -159,7 +159,7 @@ internal sealed class RowDecoder
     /// the LVAL page/row coordinates for any that hold an OTHER_PAGE (0x40) LvRef.
     /// Used to locate LVAL chains that must be freed before a row is deleted or updated.
     /// </summary>
-    public IEnumerable<(int lvalPage, int lvalRow)> GetOtherPageLvRefs(byte[] rowBytes)
+    public IEnumerable<(int lvalPage, int lvalRow, bool chained)> GetOtherPageLvRefs(byte[] rowBytes)
     {
         if (rowBytes is null || rowBytes.Length < _format.SizeRowColumnCount)
             yield break;
@@ -219,17 +219,22 @@ internal sealed class RowDecoder
             }
 
             int varLen = varEnd - varStart;
-            if (varLen < 9 || varStart < 0 || varEnd > maskOffset) continue;
+            if (varLen < 12 || varStart < 0 || varEnd > maskOffset) continue;
 
-            // Check for OTHER_PAGE (0x40) marker at byte [4] of the LvRef.
-            if (rowBytes[varStart + 4] != 0x40) continue;
+            // Real Jet LvRef: type in the top two bits of the 32-bit length.
+            // Only OTHER_PAGE / OTHER_PAGES refs occupy LVAL pages to free.
+            int  lengthWithFlags = ByteUtil.GetInt(rowBytes, varStart);
+            uint type = (uint)lengthWithFlags & 0xC0000000u;
+            if (type == 0x80000000u) continue;                 // inline - nothing to free
+            bool chained = type == 0x00000000u;                // OTHER_PAGES
+            if (!chained && type != 0x40000000u) continue;     // unknown type
 
+            int lvalRow  = rowBytes[varStart + 4];
             int lvalPage = rowBytes[varStart + 5]
                          | (rowBytes[varStart + 6] << 8)
                          | (rowBytes[varStart + 7] << 16);
-            int lvalRow  = rowBytes[varStart + 8];
 
-            yield return (lvalPage, lvalRow);
+            yield return (lvalPage, lvalRow, chained);
         }
     }
 
@@ -252,60 +257,45 @@ internal sealed class RowDecoder
     // ── Long-value decoders ───────────────────────────────────────────────────
 
     /// <summary>
-    /// Decodes a Memo LvRef from the variable-length area.
-    /// Handles THIS_PAGE (0x80) inline refs and OTHER_PAGE (0x40) LVAL-page refs.
-    /// Returns null if the ref type is unrecognised or an LVAL reader is unavailable.
+    /// Reads the bytes behind a long-value reference in the REAL Jet format
+    /// (matches Java Jackcess / ACE): [lengthWithFlags:4][row:1][page:3]
+    /// [unknown:4], type in the top two bits of the length -
+    /// 0x80000000 THIS_PAGE (inline, data at offset 12), 0x40000000 OTHER_PAGE
+    /// (single chunk), 0x00000000 OTHER_PAGES (chunk chain).
+    /// Returns null when the ref cannot be decoded.
     /// </summary>
+    private byte[]? ReadLvalBytes(byte[] row, int start, int len)
+    {
+        if (len < 12) return null;
+        int  lengthWithFlags = ByteUtil.GetInt(row, start);
+        int  dataLen = lengthWithFlags & LvalWriter.LvalLengthMask;
+        uint type    = (uint)lengthWithFlags & 0xC0000000u;
+
+        if (type == 0x80000000u)   // THIS_PAGE inline
+        {
+            int actualLen = Math.Min(dataLen, len - 12);
+            var inline = new byte[actualLen];
+            Array.Copy(row, start + 12, inline, 0, actualLen);
+            return inline;
+        }
+
+        if (_lvalReader is null) return null;
+        bool chained = type == 0x00000000u;                    // OTHER_PAGES
+        if (!chained && type != 0x40000000u) return null;      // unknown type
+
+        int lvalRow  = row[start + 4];
+        int lvalPage = row[start + 5] | (row[start + 6] << 8) | (row[start + 7] << 16);
+        return _lvalReader.Read(lvalPage, lvalRow, dataLen, chained);
+    }
+
     private string? DecodeMemoLvRef(byte[] row, int start, int len)
     {
-        if (len < 5) return null;
-        byte typeFlag = row[start + 4];
-
-        if (typeFlag == 0x80)   // THIS_PAGE (inline)
-        {
-            int dataLen   = ByteUtil.GetInt(row, start);
-            int actualLen = Math.Min(dataLen, len - 5);
-            return ByteUtil.DecodeText(row, start + 5, actualLen, _format);
-        }
-
-        if (typeFlag == 0x40 && _lvalReader is not null)   // OTHER_PAGE
-        {
-            if (len < 9) return null;
-            int dataLen  = ByteUtil.GetInt(row, start);
-            int lvalPage = row[start + 5] | (row[start + 6] << 8) | (row[start + 7] << 16);
-            int lvalRow  = row[start + 8];
-            byte[] data  = _lvalReader.Read(lvalPage, lvalRow, dataLen);
-            return ByteUtil.DecodeText(data, 0, data.Length, _format);
-        }
-
-        return null;   // OTHER_PAGE without LvalReader — cannot decode
+        var data = ReadLvalBytes(row, start, len);
+        return data is null ? null : ByteUtil.DecodeText(data, 0, data.Length, _format);
     }
 
     private byte[]? DecodeOleLvRef(byte[] row, int start, int len)
-    {
-        if (len < 5) return null;
-        byte typeFlag = row[start + 4];
-
-        if (typeFlag == 0x80)   // THIS_PAGE (inline)
-        {
-            int dataLen   = ByteUtil.GetInt(row, start);
-            int actualLen = Math.Min(dataLen, len - 5);
-            var result    = new byte[actualLen];
-            Array.Copy(row, start + 5, result, 0, actualLen);
-            return result;
-        }
-
-        if (typeFlag == 0x40 && _lvalReader is not null)   // OTHER_PAGE
-        {
-            if (len < 9) return null;
-            int dataLen  = ByteUtil.GetInt(row, start);
-            int lvalPage = row[start + 5] | (row[start + 6] << 8) | (row[start + 7] << 16);
-            int lvalRow  = row[start + 8];
-            return _lvalReader.Read(lvalPage, lvalRow, dataLen);
-        }
-
-        return null;   // OTHER_PAGE without LvalReader — cannot decode
-    }
+        => ReadLvalBytes(row, start, len);
 
     /// <summary>
     /// Decodes a Jet ShortDateTime (OLE Automation date = days since 1899-12-30).
