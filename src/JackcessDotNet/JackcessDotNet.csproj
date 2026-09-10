@@ -52,7 +52,11 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+    <!-- .NET (Core) only: .NET Framework has the legacy code pages in-box, and this
+         package's Unsafe 6.x dependency breaks redirect-free xcopy deployment there
+         (see the NETFRAMEWORK guard in JetFormat.InitEncodings). -->
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0"
+                      Condition="'$(TargetFramework)' != 'net472'" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
   </ItemGroup>
 
@@ -67,7 +71,10 @@
     <PackageReference Include="PolySharp" Version="1.14.1" PrivateAssets="All" />
   </ItemGroup>
 
-  <ItemGroup>
+  <!-- Only when unsigned: a strong-named assembly needs a public key in every
+       InternalsVisibleTo. Consumers that sign this project (e.g. embedding it in
+       a strong-named library) don't build the test project, so they don't need it. -->
+  <ItemGroup Condition="'$(SignAssembly)' != 'true'">
     <InternalsVisibleTo Include="JackcessDotNet.Tests" />
   </ItemGroup>
 
