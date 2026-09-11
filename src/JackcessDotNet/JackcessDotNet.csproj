@@ -64,8 +64,8 @@
        (Span/Memory/BinaryPrimitives, ValueTuple, HashCode). See Compat/. -->
   <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
     <Reference Include="System.ComponentModel.DataAnnotations" />
-    <PackageReference Include="System.Memory" Version="4.5.5" />
-    <PackageReference Include="Microsoft.Bcl.HashCode" Version="1.1.1" />
+    <PackageReference Include="System.Memory" Version="4.6.0" />
+    <PackageReference Include="Microsoft.Bcl.HashCode" Version="6.0.0" />
     <!-- Source-generates language-support polyfills (Index/Range, required
          members, init-only setters, ...) for down-level targets. -->
     <PackageReference Include="PolySharp" Version="1.14.1" PrivateAssets="All" />
