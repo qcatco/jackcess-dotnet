@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>net8.0;net472</TargetFrameworks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
@@ -52,11 +52,29 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0" />
+    <!-- .NET (Core) only: .NET Framework has the legacy code pages in-box, and this
+         package's Unsafe 6.x dependency breaks redirect-free xcopy deployment there
+         (see the NETFRAMEWORK guard in JetFormat.InitEncodings). -->
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0"
+                      Condition="'$(TargetFramework)' != 'net472'" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
   </ItemGroup>
 
-  <ItemGroup>
+  <!-- net472 support: framework references plus packages backfilling BCL types
+       (Span/Memory/BinaryPrimitives, ValueTuple, HashCode). See Compat/. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
+    <Reference Include="System.ComponentModel.DataAnnotations" />
+    <PackageReference Include="System.Memory" Version="4.6.0" />
+    <PackageReference Include="Microsoft.Bcl.HashCode" Version="6.0.0" />
+    <!-- Source-generates language-support polyfills (Index/Range, required
+         members, init-only setters, ...) for down-level targets. -->
+    <PackageReference Include="PolySharp" Version="1.14.1" PrivateAssets="All" />
+  </ItemGroup>
+
+  <!-- Only when unsigned: a strong-named assembly needs a public key in every
+       InternalsVisibleTo. Consumers that sign this project (e.g. embedding it in
+       a strong-named library) don't build the test project, so they don't need it. -->
+  <ItemGroup Condition="'$(SignAssembly)' != 'true'">
     <InternalsVisibleTo Include="JackcessDotNet.Tests" />
   </ItemGroup>
 

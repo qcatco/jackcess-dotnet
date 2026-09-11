@@ -159,15 +159,15 @@ internal static class PropertyMapReader
             DataType.Float         => ByteUtil.GetFloat (buf, pos),
             DataType.Double        => ByteUtil.GetDouble(buf, pos),
             DataType.ShortDateTime => TryFromOADate(ByteUtil.GetDouble(buf, pos)),
-            DataType.Guid          => new Guid(buf[pos..(pos + Math.Min(16, len))]),
+            DataType.Guid          => new Guid(buf.Slice(pos, pos + Math.Min(16, len))),
             DataType.Text          => format.Version == JetVersion.Jet3
                                           ? format.TextEncoding.GetString(buf, pos, len)
                                           : Encoding.Unicode.GetString(buf, pos, len),
             DataType.Memo          => format.Version == JetVersion.Jet3
                                           ? format.TextEncoding.GetString(buf, pos, len)
                                           : Encoding.Unicode.GetString(buf, pos, len),
-            DataType.Binary        => buf[pos..(pos + len)],
-            DataType.Ole           => buf[pos..(pos + len)],
+            DataType.Binary        => buf.Slice(pos, pos + len),
+            DataType.Ole           => buf.Slice(pos, pos + len),
             _                      => null,
         };
     }

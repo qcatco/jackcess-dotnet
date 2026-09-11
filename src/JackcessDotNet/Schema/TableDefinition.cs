@@ -73,8 +73,8 @@ public sealed class TableDefinition
     /// Usage-map page numbers for long-value (Memo/OLE) columns, keyed by column name.
     /// Populated by <see cref="Database.CreateTable"/> before <see cref="Serialize"/> is called.
     /// </summary>
-    public Dictionary<string, int> LvalColumnUmapPages { get; }
-        = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+    public Dictionary<string, LvalUmapRef> LvalColumnUmapPages { get; }
+        = new Dictionary<string, LvalUmapRef>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Real B-tree indexes parsed from the on-disk TDEF (empty for tables this
@@ -138,7 +138,7 @@ public sealed class TableDefinition
         int idxColBlocks   = numIndexes * format.SizeIndexColumnBlock;
         int idxInfoBlocks  = numIndexSlots * format.SizeIndexInfoBlock;
         int idxNameSection = numIndexSlots * (2 + pkNameBytes.Length);
-        int lvalSection    = Columns.Count(c => c.DataType.IsLongValue()) * 4;
+        int lvalSection    = Columns.Count(c => c.DataType.IsLongValue()) * 10;
         int trailerSize    = 2;
 
         int contentSize = headerSize + idxDefSection + colDefsSize + nameSection
@@ -324,13 +324,18 @@ public sealed class TableDefinition
             pos += pkNameBytes.Length;
         }
 
-        // ── LVAL column usage-map references (4 bytes each: 1-byte row + 3-byte page) ──
-        // One entry per long-value (Memo/OLE) column, in column-number order.
-        foreach (var col in Columns.Where(c => c.DataType.IsLongValue()))
+        // ── LVAL column usage-map references ─────────────────────────────────
+        // Real format (see LvalUmapRef): 10 bytes per entry, column-number
+        // prefixed, 0xFFFF terminated (the trailer below doubles as terminator).
+        foreach (var col in Columns.Where(c => c.DataType.IsLongValue())
+                                   .OrderBy(c => c.ColumnNumber))
         {
-            LvalColumnUmapPages.TryGetValue(col.Name, out int lvalPage);
-            page[pos++] = 0;                                  // row 0 = owned-pages bitmap
-            ByteUtil.Put3ByteInt(page, pos, lvalPage); pos += 3;
+            if (!LvalColumnUmapPages.TryGetValue(col.Name, out var lvalRef)) continue;
+            ByteUtil.PutShort(page, pos, (short)col.ColumnNumber); pos += 2;
+            page[pos++] = (byte)lvalRef.OwnedRow;
+            ByteUtil.Put3ByteInt(page, pos, lvalRef.OwnedPage); pos += 3;
+            page[pos++] = (byte)lvalRef.FreeRow;
+            ByteUtil.Put3ByteInt(page, pos, lvalRef.FreePage); pos += 3;
         }
 
         // ── Trailer ───────────────────────────────────────────────────────────

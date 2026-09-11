@@ -473,7 +473,7 @@ internal static class GeneralLegacyIndexCodes
         int numBytes = hex.Length / 2;
         var result = new byte[numBytes];
         for (int i = 0; i < numBytes; i++)
-            result[i] = byte.Parse(hex.AsSpan(i * 2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+            result[i] = byte.Parse(hex.Substring(i * 2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
         return result;
     }
 }
