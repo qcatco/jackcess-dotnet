@@ -9,11 +9,8 @@ public sealed class PropertyMapTests
     private readonly ITestOutputHelper _output;
     public PropertyMapTests(ITestOutputHelper output) => _output = output;
 
-    private static string? CorpusRoot()
-    {
-        const string root = @"D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data";
-        return Directory.Exists(root) ? root : null;
-    }
+    // Corpus lives in-repo under tests/corpus; TestCorpus is the one resolver.
+    private static string? CorpusRoot() => TestCorpus.Root;
 
     [Fact]
     public void PropertyMapReader_DecodesHandCraftedBlob()

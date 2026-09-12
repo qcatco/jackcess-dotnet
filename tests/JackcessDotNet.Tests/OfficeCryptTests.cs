@@ -5,16 +5,17 @@ namespace JackcessDotNet.Tests;
 
 /// <summary>
 /// End-to-end tests for the Office Agile-Encryption codec (Office 2010+ .accdb).
-/// Uses real password-protected fixtures from the upstream jackcess-encrypt repo
-/// at <c>D:/Projects/jackcess-encrypt/src/test/resources/data/</c>. If that
-/// directory isn't present, the tests skip (via <see cref="Skip.If"/> behaviour
-/// expressed as early returns) rather than fail — running on a fresh machine
-/// shouldn't need a manual clone of the reference repo just to run unit tests.
+/// Uses real password-protected fixtures from the upstream jackcess-encrypt repo.
+/// Those are NOT committed here (unlike tests/corpus) — they live in a separate
+/// project. Set <c>JACKCESS_ENCRYPT_FIXTURES</c> to that repo's
+/// <c>src/test/resources/data</c> to run these; without it every test below
+/// early-returns rather than failing, so a fresh clone needn't fetch anything.
 /// </summary>
 public sealed class OfficeCryptTests
 {
-    private const string FixtureRoot =
-        @"D:/Projects/jackcess-encrypt/src/test/resources/data";
+    private static readonly string FixtureRoot =
+        Environment.GetEnvironmentVariable("JACKCESS_ENCRYPT_FIXTURES")
+        ?? @"D:/Projects/jackcess-encrypt/src/test/resources/data";
 
     private static bool FixtureExists(string name)
         => File.Exists(Path.Combine(FixtureRoot, name));
@@ -68,10 +69,7 @@ public sealed class OfficeCryptTests
         // Password should be silently ignored when the encoding-key slot is zero
         // (i.e. the file isn't encrypted). Use any unencrypted .accdb from the
         // main jackcess corpus.
-        const string corpus = @"D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data";
-        string? path = Directory.Exists(corpus)
-            ? Directory.EnumerateFiles(corpus, "*.accdb").FirstOrDefault()
-            : null;
+        string? path = TestCorpus.Files("*.accdb", "V2007", "V2010", "V2019").FirstOrDefault();
         if (path is null) return;
 
         using var db = Database.Open(path, "this-password-is-ignored");

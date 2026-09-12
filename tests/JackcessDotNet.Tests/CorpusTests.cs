@@ -9,12 +9,10 @@ namespace JackcessDotNet.Tests;
 /// Reality-check tests that open .mdb files from the Jackcess Java test corpus
 /// (V1997 / V2000 / V2003 — V2007+ .accdb files are skipped: codec not yet implemented).
 ///
-/// Corpus root is resolved in this order:
-///   1. env var JACKCESS_CORPUS_PATH
-///   2. ../../jackcess-jackcess-5.0.0/src/test/resources/data (relative to repo root)
-///   3. D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data
-///
-/// If no corpus is found, MemberData returns empty and the theory simply runs zero cases.
+/// The corpus is committed under tests/corpus and located by <see cref="TestCorpus"/>,
+/// so these theories always have data. (An empty [Theory] is an xUnit FAILURE, not a
+/// skip — when the corpus was resolved from one developer's absolute path, that alone
+/// made CI red everywhere else.)
 /// Each file is its own theory invocation so the failure list maps 1:1 to broken files.
 /// </summary>
 public sealed class CorpusTests
@@ -25,46 +23,15 @@ public sealed class CorpusTests
 
     public static IEnumerable<object[]> CorpusFiles()
     {
-        string? root = ResolveCorpusRoot();
-        if (root is null) yield break;
+        foreach (string file in TestCorpus.Files("*.mdb", "V1997", "V2000", "V2003"))
+            yield return new object[] { VersionOf(file), Path.GetFileName(file), file };
 
-        foreach (var version in new[] { "V1997", "V2000", "V2003" })
-        {
-            string dir = Path.Combine(root, version);
-            if (!Directory.Exists(dir)) continue;
-
-            foreach (string file in Directory.EnumerateFiles(dir, "*.mdb"))
-                yield return new object[] { version, Path.GetFileName(file), file };
-        }
-
-        foreach (var version in new[] { "V2007", "V2010", "V2019" })
-        {
-            string dir = Path.Combine(root, version);
-            if (!Directory.Exists(dir)) continue;
-
-            foreach (string file in Directory.EnumerateFiles(dir, "*.accdb"))
-                yield return new object[] { version, Path.GetFileName(file), file };
-        }
+        foreach (string file in TestCorpus.Files("*.accdb", "V2007", "V2010", "V2019"))
+            yield return new object[] { VersionOf(file), Path.GetFileName(file), file };
     }
 
-    private static string? ResolveCorpusRoot()
-    {
-        string? env = Environment.GetEnvironmentVariable("JACKCESS_CORPUS_PATH");
-        if (!string.IsNullOrWhiteSpace(env) && Directory.Exists(env)) return env;
-
-        // Repo-relative fallback (lets the test work on machines other than the author's).
-        string here = AppContext.BaseDirectory;
-        for (int up = 0; up < 8; up++)
-        {
-            string candidate = Path.GetFullPath(Path.Combine(here, "..",
-                "jackcess-jackcess-5.0.0", "src", "test", "resources", "data"));
-            if (Directory.Exists(candidate)) return candidate;
-            here = Path.GetFullPath(Path.Combine(here, ".."));
-        }
-
-        const string hardcoded = @"D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data";
-        return Directory.Exists(hardcoded) ? hardcoded : null;
-    }
+    private static string VersionOf(string file)
+        => Path.GetFileName(Path.GetDirectoryName(file)!);
 
     [Theory]
     [MemberData(nameof(CorpusFiles))]

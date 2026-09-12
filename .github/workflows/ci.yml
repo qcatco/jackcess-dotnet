@@ -1,0 +1,63 @@
+# Build + full test suite on every push and every pull request, on every branch.
+#
+# Separate from nuget-publish.yml deliberately: publishing is gated on main/tags,
+# but a feature branch needs to know it is green BEFORE it opens a PR. This
+# workflow never publishes anything.
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      # Fails the job if the committed corpus is missing or truncated. Without
+      # it a bad checkout would degrade into "all corpus theories have no data",
+      # which xUnit reports as failures with a confusing message.
+      - name: Verify test corpus is present
+        shell: pwsh
+        run: |
+          $expected = @{ V1997 = 9; V2000 = 16; V2003 = 16; V2007 = 21; V2010 = 19; V2019 = 1 }
+          $bad = $false
+          foreach ($v in $expected.Keys | Sort-Object) {
+            $n = (Get-ChildItem "tests/corpus/$v" -File -ErrorAction SilentlyContinue).Count
+            "{0,-6} {1,3} files (expected {2})" -f $v, $n, $expected[$v]
+            if ($n -ne $expected[$v]) { $bad = $true }
+          }
+          if ($bad) { throw "tests/corpus is incomplete - see tests/corpus/README.md" }
+
+      - name: Restore
+        run: dotnet restore JackcessDotNet.slnx
+
+      # The library multi-targets net472 and net8.0; build both so a net472-only
+      # break (missing BCL surface, see Util/FrameworkCompat.cs) fails here and
+      # not in a downstream consumer.
+      - name: Build (net472 + net8.0)
+        run: dotnet build JackcessDotNet.slnx --configuration Release --no-restore
+
+      # No --filter. The whole suite runs, corpus tests included: they are the
+      # only thing that checks this parser against files real Access wrote.
+      - name: Test
+        run: dotnet test JackcessDotNet.slnx --configuration Release --no-build --verbosity normal --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: '**/TestResults/*.trx'
+          if-no-files-found: warn

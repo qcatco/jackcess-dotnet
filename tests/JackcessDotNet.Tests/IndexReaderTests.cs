@@ -15,11 +15,8 @@ public sealed class IndexReaderTests
     private readonly ITestOutputHelper _output;
     public IndexReaderTests(ITestOutputHelper output) => _output = output;
 
-    private static string? CorpusRoot()
-    {
-        const string root = @"D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data";
-        return Directory.Exists(root) ? root : null;
-    }
+    // Corpus lives in-repo under tests/corpus; TestCorpus is the one resolver.
+    private static string? CorpusRoot() => TestCorpus.Root;
 
     public static IEnumerable<object[]> CorpusFiles()
     {
