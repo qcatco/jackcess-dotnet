@@ -20,28 +20,39 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      # Hash every fixture in tests/corpus against MANIFEST.sha256 before doing
+      # anything else. A truncated checkout, a fixture edited in place or a .mdb
+      # mangled by a newline filter otherwise surfaces as a parser failure a long
+      # way from its cause; this turns it into one line naming the file.
+      - name: Verify test corpus
+        shell: pwsh
+        run: ./tools/corpus.ps1
+
       - name: Restore
         run: dotnet restore JackcessDotNet.slnx
 
       - name: Build
         run: dotnet build JackcessDotNet.slnx --configuration Release --no-restore
 
+      # No --filter: the corpus tests run too. They are the only thing checking
+      # this parser against files real Access wrote, so excluding them would
+      # leave the most valuable coverage switched off.
+      #
+      # Runs on tag pushes as well - with the suite green there is no reason to
+      # publish a release that was never tested.
       - name: Test
-        # The corpus theories read the Java Jackcess test corpus, which is not in
-        # this repository and is not present on GitHub-hosted runners. xUnit treats
-        # a [Theory] with no data as a FAILURE rather than a skip, so they are
-        # filtered out here - without this the whole run is red and the pipeline
-        # stops being a useful signal.
-        #
-        # To run them, provide the corpus and drop the filter:
-        #   $env:JACKCESS_CORPUS_PATH = 'path/to/jackcess-5.0.0/src/test/resources/data'
-        #   dotnet test JackcessDotNet.slnx -c Release
-        #
-        # Tests now also run on tag pushes: with the run green there is no reason
-        # to publish a release without them.
-        run: >
-          dotnet test JackcessDotNet.slnx --configuration Release --no-build --verbosity normal
-          --filter "FullyQualifiedName!~CorpusTests&FullyQualifiedName!~OnCorpusFile"
+        run: dotnet test JackcessDotNet.slnx --configuration Release --no-build --verbosity normal
+
+      # Records WHAT the run tested against, so a build log stays self-contained
+      # evidence without re-deriving it from the commit.
+      - name: Record corpus provenance
+        shell: pwsh
+        run: |
+          $m = Get-FileHash tests/corpus/MANIFEST.sha256 -Algorithm SHA256
+          $n = (Get-ChildItem tests/corpus -Recurse -File -Include *.mdb,*.accdb).Count
+          "### Test corpus`n"                           >> $env:GITHUB_STEP_SUMMARY
+          "- fixtures: **$n**"                          >> $env:GITHUB_STEP_SUMMARY
+          "- manifest sha256: ``$($m.Hash.ToLower())``" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Upload package artifact
         if: github.event_name != 'pull_request'

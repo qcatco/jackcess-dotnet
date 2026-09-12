@@ -1,0 +1,9 @@
+# Access databases and other binary fixtures - never translate their bytes.
+# (Git usually infers this, but tests/corpus is 82 MB of .mdb/.accdb and a
+# single mis-detected file would be silently corrupted, so it is spelled out.)
+*.mdb    binary
+*.accdb  binary
+*.dat    binary
+*.snk    binary
+*.png    binary
+*.nupkg  binary

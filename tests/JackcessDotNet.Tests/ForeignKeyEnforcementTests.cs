@@ -49,10 +49,9 @@ public sealed class ForeignKeyEnforcementTests : IDisposable
         // Products.SupplierID → Suppliers.SupplierID, etc. We open a copy,
         // enable enforcement, and try to insert an Orders row with a bogus
         // CustomerID — should be rejected.
-        const string corpus = @"D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data";
-        string? nw = Directory.Exists(corpus)
-            ? Directory.EnumerateFiles(corpus, "northwind*.mdb").FirstOrDefault()
-            : null;
+        // Northwind is not in the committed corpus; point JACKCESS_CORPUS_PATH at a
+        // fuller set to exercise these. Absent it, the test is a deliberate no-op.
+        string? nw = TestCorpus.Files("northwind*.mdb", "V2000", "V2003", "V2007").FirstOrDefault();
         if (nw is null) return;
 
         File.Copy(nw, _path, overwrite: true);
@@ -84,10 +83,9 @@ public sealed class ForeignKeyEnforcementTests : IDisposable
     {
         // Opposite of the violation test: pluck a real parent PK value from the
         // parent table and use it in the child — should pass without throwing.
-        const string corpus = @"D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data";
-        string? nw = Directory.Exists(corpus)
-            ? Directory.EnumerateFiles(corpus, "northwind*.mdb").FirstOrDefault()
-            : null;
+        // Northwind is not in the committed corpus; point JACKCESS_CORPUS_PATH at a
+        // fuller set to exercise these. Absent it, the test is a deliberate no-op.
+        string? nw = TestCorpus.Files("northwind*.mdb", "V2000", "V2003", "V2007").FirstOrDefault();
         if (nw is null) return;
 
         File.Copy(nw, _path, overwrite: true);
@@ -138,10 +136,9 @@ public sealed class ForeignKeyEnforcementTests : IDisposable
         // Once disabled, subsequent inserts should NOT validate even if a
         // relationship would have rejected them. Confirms there's no
         // sticky/cached enforcement state.
-        const string corpus = @"D:/Projects/jackcess-jackcess-5.0.0/src/test/resources/data";
-        string? nw = Directory.Exists(corpus)
-            ? Directory.EnumerateFiles(corpus, "northwind*.mdb").FirstOrDefault()
-            : null;
+        // Northwind is not in the committed corpus; point JACKCESS_CORPUS_PATH at a
+        // fuller set to exercise these. Absent it, the test is a deliberate no-op.
+        string? nw = TestCorpus.Files("northwind*.mdb", "V2000", "V2003", "V2007").FirstOrDefault();
         if (nw is null) return;
 
         File.Copy(nw, _path, overwrite: true);
