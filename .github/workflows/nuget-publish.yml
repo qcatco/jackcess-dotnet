@@ -12,7 +12,7 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # sourcelink needs full history
 
@@ -21,7 +21,7 @@ jobs:
       # "MSB4068: The element <Solution> is unrecognized", which is why this
       # workflow has not built since global.json pinned the SDK - it never got
       # as far as compiling, let alone testing. Output still targets net8.0.
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: |
             8.0.x
@@ -63,7 +63,7 @@ jobs:
 
       - name: Upload package artifact
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nupkg
           path: |
@@ -77,12 +77,12 @@ jobs:
     runs-on: windows-latest
     environment: nuget   # optional GitHub Environment with manual approval
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: nupkg
           path: artifacts
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
 
