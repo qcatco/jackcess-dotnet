@@ -16,9 +16,16 @@ jobs:
         with:
           fetch-depth: 0   # sourcelink needs full history
 
+      # 9.0.x as well as 8.0.x: the solution is a .slnx, and .slnx support only
+      # arrived in the 9.0.2xx SDK. Restore fails outright on 8.0.x with
+      # "MSB4068: The element <Solution> is unrecognized", which is why this
+      # workflow has not built since global.json pinned the SDK - it never got
+      # as far as compiling, let alone testing. Output still targets net8.0.
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            9.0.x
 
       # Hash every fixture in tests/corpus against MANIFEST.sha256 before doing
       # anything else. A truncated checkout, a fixture edited in place or a .mdb
