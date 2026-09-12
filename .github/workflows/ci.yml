@@ -21,9 +21,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 9.0.x as well as 8.0.x: the solution is a .slnx, and .slnx support only
+      # arrived in the 9.0.2xx SDK. Our global.json rolls forward to latestMajor
+      # so this currently works off whatever the runner image ships - installing
+      # 9.0.x explicitly makes that deterministic instead of incidental.
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: |
+            8.0.x
+            9.0.x
 
       # Hash every fixture against tests/corpus/MANIFEST.sha256 BEFORE building.
       # A missing, truncated, edited or newline-mangled .mdb otherwise surfaces
