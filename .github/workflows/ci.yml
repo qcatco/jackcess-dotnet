@@ -25,20 +25,25 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      # Fails the job if the committed corpus is missing or truncated. Without
-      # it a bad checkout would degrade into "all corpus theories have no data",
-      # which xUnit reports as failures with a confusing message.
-      - name: Verify test corpus is present
+      # Hash every fixture against tests/corpus/MANIFEST.sha256 BEFORE building.
+      # A missing, truncated, edited or newline-mangled .mdb otherwise surfaces
+      # as a baffling parser failure a long way from the cause; this turns it
+      # into one line naming the file. Runs first so it costs 2s to rule out.
+      - name: Verify test corpus
+        shell: pwsh
+        run: ./tools/corpus.ps1
+
+      # Record WHAT was tested against, so a build log is self-contained
+      # evidence months from now without re-deriving it from the commit.
+      - name: Record corpus provenance
         shell: pwsh
         run: |
-          $expected = @{ V1997 = 9; V2000 = 16; V2003 = 16; V2007 = 21; V2010 = 19; V2019 = 1 }
-          $bad = $false
-          foreach ($v in $expected.Keys | Sort-Object) {
-            $n = (Get-ChildItem "tests/corpus/$v" -File -ErrorAction SilentlyContinue).Count
-            "{0,-6} {1,3} files (expected {2})" -f $v, $n, $expected[$v]
-            if ($n -ne $expected[$v]) { $bad = $true }
-          }
-          if ($bad) { throw "tests/corpus is incomplete - see tests/corpus/README.md" }
+          $m = Get-FileHash tests/corpus/MANIFEST.sha256 -Algorithm SHA256
+          $n = (Get-ChildItem tests/corpus -Recurse -File -Include *.mdb,*.accdb).Count
+          "### Test corpus`n"                                   >> $env:GITHUB_STEP_SUMMARY
+          "- fixtures: **$n**"                                  >> $env:GITHUB_STEP_SUMMARY
+          "- manifest sha256: ``$($m.Hash.ToLower())``"         >> $env:GITHUB_STEP_SUMMARY
+          "- commit: ``$env:GITHUB_SHA``"                       >> $env:GITHUB_STEP_SUMMARY
 
       - name: Restore
         run: dotnet restore JackcessDotNet.slnx

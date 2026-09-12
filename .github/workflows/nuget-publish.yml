@@ -20,6 +20,10 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: Verify test corpus
+        shell: pwsh
+        run: ./tools/corpus.ps1
+
       - name: Restore
         run: dotnet restore JackcessDotNet.slnx
 
