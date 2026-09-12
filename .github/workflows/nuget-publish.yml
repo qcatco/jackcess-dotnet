@@ -12,7 +12,7 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0   # sourcelink needs full history
 
@@ -20,7 +20,7 @@ jobs:
       # arrived in the 9.0.2xx SDK. global.json rolls forward to latestMajor so
       # this currently works off whatever the runner image ships - installing
       # 9.0.x explicitly makes that deterministic instead of incidental.
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: |
             8.0.x
@@ -44,7 +44,7 @@ jobs:
 
       - name: Upload package artifact
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nupkg
           path: |
@@ -58,12 +58,12 @@ jobs:
     runs-on: windows-latest
     environment: nuget   # optional GitHub Environment with manual approval
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: nupkg
           path: artifacts
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
 

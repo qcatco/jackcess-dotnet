@@ -35,7 +35,12 @@ public sealed class DatabaseBuilder
     /// <summary>Creates a new database at the configured path.</summary>
     public Database Create()
     {
-        if (string.IsNullOrWhiteSpace(_path))
+        // The null test is spelled out separately rather than left to
+        // IsNullOrWhiteSpace: net472's reference assemblies lack the
+        // [NotNullWhen(false)] annotation on it, so flow analysis cannot see
+        // _path as non-null afterwards and the net472 leg warns CS8604. An
+        // explicit `is null` narrows on both targets without a suppression.
+        if (_path is null || string.IsNullOrWhiteSpace(_path))
             throw new InvalidOperationException("DatabaseBuilder.Create requires a file path (call WithFile).");
         return Database.Create(_path, _version);
     }
