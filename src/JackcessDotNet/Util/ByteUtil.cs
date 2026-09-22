@@ -38,7 +38,7 @@ internal static class ByteUtil
         => BitConverter.Int64BitsToDouble(GetLong(buf, offset));
 
     public static float GetFloat(byte[] buf, int offset)
-#if NETFRAMEWORK
+#if NETFRAMEWORK || NETSTANDARD2_0
         => System.Buffers.Binary.BinaryPrimitivesCompat.Int32BitsToSingle(GetInt(buf, offset));
 #else
         => BitConverter.Int32BitsToSingle(GetInt(buf, offset));
@@ -94,7 +94,7 @@ internal static class ByteUtil
         => PutLong(buf, offset, BitConverter.DoubleToInt64Bits(value));
 
     public static void PutFloat(byte[] buf, int offset, float value)
-#if NETFRAMEWORK
+#if NETFRAMEWORK || NETSTANDARD2_0
         => PutInt(buf, offset, System.Buffers.Binary.BinaryPrimitivesCompat.SingleToInt32Bits(value));
 #else
         => PutInt(buf, offset, BitConverter.SingleToInt32Bits(value));

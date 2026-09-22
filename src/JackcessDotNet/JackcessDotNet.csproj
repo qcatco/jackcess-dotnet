@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net8.0;net472</TargetFrameworks>
+    <TargetFrameworks>net8.0;net472;netstandard2.0</TargetFrameworks>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
@@ -56,14 +56,15 @@
          package's Unsafe 6.x dependency breaks redirect-free xcopy deployment there
          (see the NETFRAMEWORK guard in JetFormat.InitEncodings). -->
     <PackageReference Include="System.Text.Encoding.CodePages" Version="8.0.0"
-                      Condition="'$(TargetFramework)' != 'net472'" />
+                      Condition="'$(TargetFramework)' != 'net472' AND '$(TargetFramework)' != 'netstandard2.0'" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
   </ItemGroup>
 
   <!-- net472 support: framework references plus packages backfilling BCL types
        (Span/Memory/BinaryPrimitives, ValueTuple, HashCode). See Compat/. -->
-  <ItemGroup Condition="'$(TargetFramework)' == 'net472'">
-    <Reference Include="System.ComponentModel.DataAnnotations" />
+  <ItemGroup Condition="'$(TargetFramework)' == 'net472' OR '$(TargetFramework)' == 'netstandard2.0'">
+    <Reference Include="System.ComponentModel.DataAnnotations" Condition="'$(TargetFramework)' == 'net472'" />
+    <PackageReference Include="System.ComponentModel.Annotations" Version="5.0.0" Condition="'$(TargetFramework)' == 'netstandard2.0'" />
     <PackageReference Include="System.Memory" Version="4.6.0" />
     <PackageReference Include="Microsoft.Bcl.HashCode" Version="6.0.0" />
     <!-- Source-generates language-support polyfills (Index/Range, required

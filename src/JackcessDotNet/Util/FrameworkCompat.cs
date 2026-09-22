@@ -7,7 +7,7 @@ namespace JackcessDotNet.Util
 {
     internal static class EncodingCompat
     {
-#if NETFRAMEWORK
+#if NETFRAMEWORK || NETSTANDARD2_0
         // Encoding.Latin1 was added in .NET 5; 28591 is ISO-8859-1.
         internal static readonly Encoding Latin1 = Encoding.GetEncoding(28591);
 #else
@@ -60,7 +60,7 @@ namespace JackcessDotNet.Util
     }
 }
 
-#if NETFRAMEWORK
+#if NETFRAMEWORK || NETSTANDARD2_0
 namespace System.Buffers.Binary
 {
     internal static class BinaryPrimitivesCompat
