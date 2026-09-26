@@ -1,3 +1,9 @@
+<!-- qcat-repository-image:start -->
+<p align="center">
+  <img src=".github/repository-card.png" alt="jackcess-dotnet repository image" width="320" />
+</p>
+<!-- qcat-repository-image:end -->
+
 # JackcessDotNet
 
 [![NuGet](https://img.shields.io/nuget/v/JackcessDotNet?logo=nuget&label=NuGet)](https://www.nuget.org/packages/JackcessDotNet)
