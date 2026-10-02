@@ -1,3 +1,6 @@
+# Store text as LF and use LF on every platform.
+* text=auto eol=lf
+
 # Access databases and other binary fixtures - never translate their bytes.
 # (Git usually infers this, but tests/corpus is 82 MB of .mdb/.accdb and a
 # single mis-detected file would be silently corrupted, so it is spelled out.)
