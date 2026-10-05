@@ -471,7 +471,8 @@ public sealed class Database : IDisposable
 
         var format = _file.Format;
 
-        // Everything that can refuse the table does so before a page is added.
+        // Everything that can refuse the table does so before a page is added: the key, the
+        // definition (laid out once with no pages), the name and the catalog.
         if (pkColumns is { Count: > 0 })
         {
             foreach (string pk in pkColumns)
@@ -484,6 +485,11 @@ public sealed class Database : IDisposable
                         "so its index entries would not be the ones Access writes.");
             }
         }
+        new TableDefinition(name, columns)
+        {
+            PrimaryKeyIndexPage   = pkColumns is { Count: > 0 } ? 1 : 0,
+            PrimaryKeyColumnNames = pkColumns ?? Array.Empty<string>(),
+        }.Serialize(format);
         _catalog.EnsureCanRegister(name);
 
         // 1. Allocate the TDEF page (content written in step 3).

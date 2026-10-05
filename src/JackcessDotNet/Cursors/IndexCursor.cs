@@ -4,14 +4,11 @@ namespace JackcessDotNet;
 /// Cursor that supports key-based row lookup.
 ///
 /// Lookup strategy:
-///   1. If this is the primary-key cursor and the table was created by this library
-///      (TableDefinition.PrimaryKeyIndexPage &gt; 0), use the existing
-///      <see cref="IndexWriter.FindRowByPrimaryKey"/> single-leaf scan.
-///   2. Otherwise — including for indexes that exist on disk but weren't authored by us —
-///      fall back to a forward table scan that compares column values.
-///
-/// B-tree traversal for Access-authored indexes is not implemented yet; for those
-/// the cursor still returns correct results, just at O(n).
+///   1. The primary key, when its keys are ones this library makes: through
+///      <see cref="IndexWriter"/>'s walk of the tree, whoever wrote it.
+///   2. Otherwise an index on disk whose keys <see cref="IndexReader"/> makes.
+///   3. Otherwise a forward table scan that compares column values: an index whose
+///      keys cannot be made (a text index in another sort order) is not trusted.
 /// </summary>
 public sealed class IndexCursor : Cursor
 {
@@ -53,18 +50,14 @@ public sealed class IndexCursor : Cursor
     /// </summary>
     public Row? FindRow(string columnName, object value)
     {
-        // Fast path #1: PK index leaf written by our own IndexWriter.
-        // Access uses prefix-compression on most real indexes — those entries can't be
-        // matched by EnumerateRowPointersForKey since the on-disk bytes have a shared
-        // prefix stripped. We detect compression via the leaf's compressed-byte-count
-        // field and skip this path when non-zero, deferring to IndexReader (path #2).
+        // Fast path #1: the primary key, through IndexWriter's own walk of the tree (prefix-compressed
+        // pages and any depth), when its keys are ones IndexKeys makes.
         bool path1Eligible =
             _isPrimaryKey
             && _definition.PrimaryKeyIndexPage > 0
             && _definition.PrimaryKeyColumnName is not null
             && string.Equals(columnName, _definition.PrimaryKeyColumnName, StringComparison.OrdinalIgnoreCase)
-            && IndexWriter.PrimaryKeyColumns(_definition).All(c => IndexKeys.CanEncode(c.Column))
-            && LeafIsUncompressed(_definition.PrimaryKeyIndexPage);
+            && IndexWriter.PrimaryKeyColumns(_definition).All(c => IndexKeys.CanEncode(c.Column));
         if (path1Eligible)
         {
             var iw = new IndexWriter(_file, new PageAllocator(_file));
@@ -172,22 +165,27 @@ public sealed class IndexCursor : Cursor
             }
         }
 
-        // Scan path: positionally match against the table's columns in column-number order.
+        // Scan path: match the chosen index's columns, as its lookup would (an index whose keys
+        // cannot be made: a text index in another sort order); with no index, positionally
+        // against the table's columns in column-number order.
         BeforeFirst();
         while (GetNextRow() is { } r)
         {
-            bool match = true;
-            for (int i = 0; i < entryValues.Length && i < _definition.Columns.Count; i++)
-            {
-                var col = _definition.Columns[i];
-                if (!r.TryGetValue(col.Name, out var stored) || !ValuesEqual(stored, entryValues[i]))
-                {
-                    match = false; break;
-                }
-            }
-            if (match) return r;
+            if (ix is not null ? RowMatchesEntry(r, ix, entryValues) : MatchesLeadingColumns(r, entryValues))
+                return r;
         }
         return null;
+    }
+
+    private bool MatchesLeadingColumns(Row row, object?[] entry)
+    {
+        for (int i = 0; i < entry.Length && i < _definition.Columns.Count; i++)
+        {
+            var col = _definition.Columns[i];
+            if (!row.TryGetValue(col.Name, out var stored) || !ValuesEqual(stored, entry[i]))
+                return false;
+        }
+        return true;
     }
 
     private Index? SelectIndexForEntry(int entryLen)
@@ -216,26 +214,6 @@ public sealed class IndexCursor : Cursor
                 return false;
         }
         return true;
-    }
-
-    /// <summary>
-    /// True if the index leaf at <paramref name="pageNumber"/> has zero compressed-prefix
-    /// bytes — meaning entries are stored full-length and our <see cref="IndexWriter"/>
-    /// reader can scan them directly. Access leaves typically have non-zero compression.
-    /// </summary>
-    private bool LeafIsUncompressed(int pageNumber)
-    {
-        try
-        {
-            byte[] page = _file.ReadPage(pageNumber);
-            if (page[0] != JetFormat.PageTypeIndexLeaf) return false;
-            int compressed = JackcessDotNet.Util.ByteUtil.GetUShort(page, _file.Format.OffsetIndexCompressedByteCount);
-            return compressed == 0;
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     /// <summary>

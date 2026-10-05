@@ -77,8 +77,9 @@ public sealed class PageFile : IDisposable
     /// <summary>
     /// As <see cref="ReadPage"/>, for a page every page appended consults (the header,
     /// the global usage map): read from the file once, then kept as written here. The
-    /// copy returned is the caller's to change. Like the rest of this library, it does
-    /// not see another process writing the file while it is open.
+    /// copy returned is the caller's to change. A file has one writer: like the rest of
+    /// this library, it does not see what another handle on the file writes - another
+    /// Database open on it, in this process or another - while it is open.
     /// </summary>
     internal byte[] ReadKeptPage(int pageNumber)
     {

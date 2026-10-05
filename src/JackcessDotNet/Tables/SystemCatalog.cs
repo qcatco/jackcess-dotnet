@@ -169,9 +169,12 @@ public sealed class SystemCatalog
             ?? throw new InvalidDataException("MSysObjects has no Tables container to put a table in.");
         int tablesId = (int)Value(tables, ColId)!;
 
-        if (catalog.Any(r => Value(r, ColParentId) is int parent && parent == tablesId
-                          && Value(r, ColName) is string name
-                          && string.Equals(name, tableName, StringComparison.OrdinalIgnoreCase)))
+        // A table's name is any object's in the Tables container, and any table's: versions of this
+        // library before 2.1.1 registered tables with ParentId 0, outside the container.
+        if (catalog.Any(r => Value(r, ColName) is string name
+                          && string.Equals(name, tableName, StringComparison.OrdinalIgnoreCase)
+                          && (Value(r, ColParentId) is int parent && parent == tablesId
+                              || Value(r, ColType) is short type && type == JetFormat.CatalogTypeTable)))
             throw new InvalidOperationException($"An object named '{tableName}' already exists in this database.");
 
         int acesTdef = FindTableTdefPage("MSysACEs");

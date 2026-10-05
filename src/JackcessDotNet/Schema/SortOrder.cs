@@ -21,6 +21,9 @@ internal readonly record struct SortOrder(short Code, byte Version)
 
     public bool IsGeneralLegacy => this == GeneralLegacy;
 
+    /// <summary>One of Access 97's orders, read from a Jet3 column: Jet4 has no form for it.</summary>
+    public bool IsAccess97 => Version == Access97Version;
+
     /// <summary>
     /// The sort order a column definition holds at <paramref name="at"/>: the code, then in Jet4 a byte this
     /// library does not use and the version. A code of 0 is what versions of this library before sort orders

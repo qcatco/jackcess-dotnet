@@ -151,6 +151,10 @@ public sealed class TableDefinition
         int contentSize = headerSize + idxDefSection + colDefsSize + nameSection
                         + idxColBlocks + idxInfoBlocks + idxNameSection
                         + lvalSection + trailerSize;
+        if (contentSize > format.PageSize)
+            throw new NotSupportedException(
+                $"Table '{Name}''s definition takes {contentSize} bytes, more than its page holds ({format.PageSize}); " +
+                "a definition over more than one page is not written.");
 
         // The page buffer is always a full page; content starts at byte 0.
         var page = new byte[format.PageSize];
@@ -236,7 +240,8 @@ public sealed class TableDefinition
             if (col.DataType is DataType.Text or DataType.Memo)
             {
                 // The order the column sorts in: Access keys a column with none in an order of its own.
-                col.SortOrder.Write(page, pos, format);
+                // Access 97's orders have no Jet4 form; such a column sorts in General - Legacy.
+                (col.SortOrder.IsAccess97 ? SortOrder.GeneralLegacy : col.SortOrder).Write(page, pos, format);
                 pos += format.SizeSortOrder;
             }
             else

@@ -18,18 +18,23 @@ namespace JackcessDotNet;
 ///     the leaves.
 ///   • Every page of an index is in the index's used-pages usage map.
 ///
-/// Entries are written in full (a shared-prefix length of 0, which Access
-/// reads); a page Access wrote with a shared prefix is read and rewritten that
-/// way. A page that overflows splits in two and its parent gains an entry; a
-/// parent that overflows splits the same way. The root keeps its page, as
-/// Jackcess's does: when it splits, its entries move to two new pages beneath it
-/// and it becomes the node above them, and a root left with one child takes that
-/// child's entries back. So the TDEF's root, and every copy of it a reader or
-/// writer holds, stays right.
+/// A page stores the bytes all its keys begin with once, as Access does: the first
+/// entry is written in full, the rest without that prefix, whose length the page
+/// header holds (Jackcess takes it the same way, from the first and last keys).
+/// A full Access page holds more entries than would fit written out in full, so
+/// every page is written that way. A page that does not fit, after any change,
+/// splits - in two, or, where a key sharing nothing with its neighbours undoes the
+/// packing, into as many pieces as halving takes - and its parent gains an entry
+/// for each new piece; a parent that overflows splits the same way. The root keeps
+/// its page, as Jackcess's does: when it splits, its entries move to new pages
+/// beneath it and it becomes the node above them, and a root left with one child
+/// takes that child's entries back, as often as that leaves it with one child. So
+/// the TDEF's root, and every copy of it a reader or writer holds, stays right.
 ///
 /// Pages written by earlier versions of this library (an entry for every child,
-/// each with row pointer 0, and no tail; 0xFFFFFFFF for "no page") are read either
-/// way and brought to these rules when the tree is changed.
+/// each with row pointer 0, and no tail; 0xFFFFFFFF for "no page"; no TDEF named)
+/// are read either way and brought to these rules, children and all, when the
+/// tree is changed.
 /// </summary>
 public sealed class IndexWriter
 {
@@ -184,17 +189,24 @@ public sealed class IndexWriter
         var page = ReadFor(target, target.RootPage);
         while (!page.IsLeaf)
         {
-            UseTail(page, persist: true);
+            UseTail(page, target);
             int slot = FirstAtLeast(page.Entries, entry);
             path.Add((page, slot));
             page = ReadFor(target, slot >= 0 ? page.Entries[slot].SubPage : page.Tail);
         }
         InsertSorted(page.Entries, entry);
+        page.Level = 0;
+        WriteUp(path, path.Count, page, target);
+    }
 
-        // Write the leaf; while a page does not fit, split it and give its parent the entry.
-        var child = page;
-        child.Level = 0;
-        for (int depth = path.Count; ; depth--)
+    /// <summary>
+    /// Writes <paramref name="child"/>, the page at <paramref name="depth"/> on <paramref name="path"/> (whose
+    /// parent is <c>path[depth - 1]</c>): while a page does not fit, it splits and its parent gains the entry, up to
+    /// the root, which splits in place.
+    /// </summary>
+    private void WriteUp(List<(IndexPage Node, int Slot)> path, int depth, IndexPage child, Target target)
+    {
+        for (; ; depth--)
         {
             if (Fits(child))
             {
@@ -208,22 +220,23 @@ public sealed class IndexWriter
                 return;
             }
 
-            var (left, right, leftLast) = Split(child, target);
+            var (pieces, lasts) = Split(child, target, keepNumber: true);
+            var added = lasts.Select((last, i) => new Entry(last.Key, last.RowPtr, pieces[i].Number)).ToList();
 
             var (parent, parentSlot) = path[depth - 1];
             if (parentSlot >= 0)
             {
-                // The split page's entry now names its left half; its right half takes
-                // the old entry, whose last row it now holds.
+                // The split page's entry now names its last piece, which holds its last row;
+                // each piece before it gets an entry of its own.
                 var old = parent.Entries[parentSlot];
-                parent.Entries[parentSlot] = new Entry(leftLast.Key, leftLast.RowPtr, left.Number);
-                parent.Entries.Insert(parentSlot + 1, new Entry(old.Key, old.RowPtr, right.Number));
+                parent.Entries[parentSlot] = new Entry(old.Key, old.RowPtr, pieces[^1].Number);
+                parent.Entries.InsertRange(parentSlot, added);
             }
             else
             {
-                // The split page was the tail: its left half gets an entry, its right half is the tail.
-                parent.Entries.Add(new Entry(leftLast.Key, leftLast.RowPtr, left.Number));
-                parent.Tail = right.Number;
+                // The split page was the tail: the pieces before its last get entries; its last is the tail.
+                parent.Entries.AddRange(added);
+                parent.Tail = pieces[^1].Number;
             }
             parent.Level = child.Level + 1;
             child = parent;
@@ -244,7 +257,7 @@ public sealed class IndexWriter
         var page = ReadFor(target, target.RootPage);
         while (!page.IsLeaf)
         {
-            UseTail(page, persist: true);
+            UseTail(page, target);
             int slot = FirstAtLeast(page.Entries, entry);
             path.Add((page, slot));
             page = ReadFor(target, slot >= 0 ? page.Entries[slot].SubPage : page.Tail);
@@ -287,31 +300,13 @@ public sealed class IndexWriter
 
         if (depth == 0 && !child.IsLeaf && child.Entries.Count == 0)
         {
-            // A root with one child takes that child's entries back, on its own page; a root
-            // with none is an empty leaf again.
-            if (child.Tail > 0)
-            {
-                var only = Read(child.Tail);
-                var root = new IndexPage(child.Number, only.IsLeaf, child.Raw)
-                {
-                    Tdef  = target.TdefPage,
-                    Level = only.Level,
-                    Tail  = only.Tail,
-                };
-                root.Entries.AddRange(only.Entries);
-                Write(root);
-                if (target.UmapPage > 0)
-                    UsageMap.RemovePage(_file, target.UmapPage, target.UmapRow, only.Number);
-            }
-            else
-            {
-                Write(new IndexPage(child.Number, isLeaf: true, child.Raw) { Tdef = target.TdefPage });
-            }
+            CollapseRoot(child, target);
             return;
         }
-        Write(child);
+        WriteUp(path, depth, child, target);
 
-        // The first ancestor naming the page in an entry copies its new last entry.
+        // The first ancestor naming the page in an entry copies its new last entry, which can
+        // make that ancestor's page too full: it splits as an insert's would.
         if (newLast is { } changed)
         {
             for (int d = depth - 1; d >= 0; d--)
@@ -319,10 +314,39 @@ public sealed class IndexWriter
                 var (parent, slot) = path[d];
                 if (slot < 0) continue;
                 parent.Entries[slot] = new Entry(changed.Key, changed.RowPtr, parent.Entries[slot].SubPage);
-                Write(parent);
+                WriteUp(path, d, parent, target);
                 break;
             }
         }
+    }
+
+    /// <summary>
+    /// A root with one child takes that child's entries back, on its own page, for as
+    /// long as that leaves it with one child; a root with none is an empty leaf again.
+    /// </summary>
+    private void CollapseRoot(IndexPage root, Target target)
+    {
+        while (!root.IsLeaf && root.Entries.Count == 0)
+        {
+            if (root.Tail <= 0)
+            {
+                Write(new IndexPage(root.Number, isLeaf: true, root.Raw) { Tdef = target.TdefPage });
+                return;
+            }
+            var only = Read(root.Tail);
+            var taken = new IndexPage(root.Number, only.IsLeaf, root.Raw)
+            {
+                Tdef  = target.TdefPage,
+                Level = only.Level,
+                Tail  = only.Tail,
+            };
+            taken.Entries.AddRange(only.Entries);
+            if (!Fits(taken)) break;   // a child Access packed tighter than these pages are written
+            if (target.UmapPage > 0)
+                UsageMap.RemovePage(_file, target.UmapPage, target.UmapRow, only.Number);
+            root = taken;
+        }
+        Write(root);
     }
 
     // A page leaving the tree: out of its level's chain and its index's usage map.
@@ -344,7 +368,7 @@ public sealed class IndexWriter
         var page  = Read(rootPage);
         while (!page.IsLeaf)
         {
-            UseTail(page, persist: false);
+            UseTail(page, target: null);
             int slot  = FirstAtLeast(page.Entries, first);
             int child = slot >= 0 ? page.Entries[slot].SubPage : page.Tail;
             if (child <= 0) yield break;
@@ -367,113 +391,119 @@ public sealed class IndexWriter
     // ── Splitting ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Splits <paramref name="page"/> into itself (the first half) and a new page
-    /// (the second), linked between it and its old next page, and writes both.
-    /// Returns the halves and the last entry under the left half: a leaf's last
-    /// entry, or for a node the entry of the child that becomes its tail.
+    /// Splits <paramref name="page"/>, which does not fit, into pieces that each do:
+    /// it halves, and a half that still does not fit halves again, as a page holding
+    /// keys that share a long prefix and one that shares none can need. With
+    /// <paramref name="keepNumber"/> the first piece keeps the page's number and the
+    /// pieces take its place in its level's chain; otherwise they are all new pages,
+    /// chained to one another. Writes them and returns them in order with, for each
+    /// but the last, the last entry under it, which its parent holds a copy of (the
+    /// last piece's is the page's own).
     /// </summary>
-    private (IndexPage Left, IndexPage Right, Entry LeftLast) Split(IndexPage page, Target target)
+    private (List<IndexPage> Pieces, List<Entry> Lasts) Split(IndexPage page, Target target, bool keepNumber)
     {
-        var right = new IndexPage(_allocator.AllocatePage(), page.IsLeaf, raw: null)
-        {
-            Tdef  = target.TdefPage,
-            Level = page.Level,
-            Prev  = page.Number,
-            Next  = page.Next,
-        };
+        var contents = new List<(List<Entry> Entries, int Tail)>();
+        var lasts    = new List<Entry>();
+        Halve(page.IsLeaf, page.Entries, page.Tail, contents, lasts);
 
-        Entry leftLast;
-        int mid = page.Entries.Count / 2;
-        if (page.IsLeaf)
+        var pieces = new List<IndexPage>();
+        for (int i = 0; i < contents.Count; i++)
         {
-            right.Entries.AddRange(page.Entries.Skip(mid));
-            page.Entries.RemoveRange(mid, page.Entries.Count - mid);
-            leftLast = page.Entries[^1];
+            var piece = i == 0 && keepNumber
+                ? new IndexPage(page.Number, page.IsLeaf, page.Raw)
+                : new IndexPage(_allocator.AllocatePage(), page.IsLeaf, raw: null);
+            piece.Tdef  = target.TdefPage;
+            piece.Level = page.Level;
+            piece.Tail  = contents[i].Tail;
+            piece.Entries.AddRange(contents[i].Entries);
+            pieces.Add(piece);
+        }
+        for (int i = 0; i < pieces.Count; i++)
+        {
+            pieces[i].Prev = i > 0 ? pieces[i - 1].Number : keepNumber ? page.Prev : 0;
+            pieces[i].Next = i < pieces.Count - 1 ? pieces[i + 1].Number : keepNumber ? page.Next : 0;
+        }
+        if (keepNumber && page.Next > 0)
+            PatchLink(page.Next, _format.OffsetPrevIndexPage, pieces[^1].Number);
+
+        foreach (var piece in pieces)
+            Write(piece);
+        foreach (var piece in pieces.Skip(keepNumber ? 1 : 0))
+            Own(target, piece.Number);
+        return (pieces, lasts);
+    }
+
+    // Halves a page's content until each part fits, adding the parts and, between them, the
+    // last entry under each part but the last. A node's middle entry goes up between its halves:
+    // its child becomes the left half's tail.
+    private void Halve(bool isLeaf, List<Entry> entries, int tail, List<(List<Entry>, int)> parts, List<Entry> lasts)
+    {
+        if (Fits(isLeaf, entries))
+        {
+            parts.Add((entries, tail));
+            return;
+        }
+        int mid = entries.Count / 2;
+        if (isLeaf)
+        {
+            if (entries.Count < 2)
+                throw new InvalidDataException($"An index entry of {entries[0].Key.Length + LeafTrailerLen} bytes does not fit a page.");
+            Halve(true, entries.GetRange(0, mid), 0, parts, lasts);
+            lasts.Add(entries[mid - 1]);
+            Halve(true, entries.GetRange(mid, entries.Count - mid), 0, parts, lasts);
         }
         else
         {
-            if (page.Entries.Count < 3)
-                throw new InvalidDataException($"Index page {page.Number} is full with {page.Entries.Count} entries.");
-            leftLast   = page.Entries[mid];
-            right.Tail = page.Tail;
-            right.Entries.AddRange(page.Entries.Skip(mid + 1));
-            page.Tail  = leftLast.SubPage;
-            page.Entries.RemoveRange(mid, page.Entries.Count - mid);
+            if (entries.Count < 3)
+                throw new InvalidDataException($"An index node of {entries.Count} entries does not fit a page.");
+            var middle = entries[mid];
+            Halve(false, entries.GetRange(0, mid), middle.SubPage, parts, lasts);
+            lasts.Add(middle);
+            Halve(false, entries.GetRange(mid + 1, entries.Count - mid - 1), tail, parts, lasts);
         }
-
-        if (page.Next > 0)
-            PatchLink(page.Next, _format.OffsetPrevIndexPage, right.Number);
-        page.Next = right.Number;
-
-        Write(page);
-        Write(right);
-        Own(target, right.Number);
-        return (page, right, leftLast);
     }
 
     /// <summary>
-    /// Splits the root without moving it, as Jackcess does: its entries go to two new
-    /// pages beneath it, linked as its level's chain, and it becomes the node above them.
+    /// Splits the root without moving it, as Jackcess does: its content goes to new
+    /// pages beneath it, as many as fit it, chained as their level, and it becomes the
+    /// node above them - splitting again, the same way, if that node does not fit.
     /// </summary>
     private void SplitRoot(IndexPage root, Target target)
     {
-        var left  = new IndexPage(_allocator.AllocatePage(), root.IsLeaf, raw: null) { Tdef = target.TdefPage, Level = root.Level };
-        var right = new IndexPage(_allocator.AllocatePage(), root.IsLeaf, raw: null) { Tdef = target.TdefPage, Level = root.Level };
-
-        Entry leftLast;
-        int mid = root.Entries.Count / 2;
-        if (root.IsLeaf)
-        {
-            left.Entries.AddRange(root.Entries.Take(mid));
-            right.Entries.AddRange(root.Entries.Skip(mid));
-            leftLast = left.Entries[^1];
-        }
-        else
-        {
-            if (root.Entries.Count < 3)
-                throw new InvalidDataException($"Index page {root.Number} is full with {root.Entries.Count} entries.");
-            leftLast   = root.Entries[mid];
-            left.Entries.AddRange(root.Entries.Take(mid));
-            left.Tail  = leftLast.SubPage;
-            right.Entries.AddRange(root.Entries.Skip(mid + 1));
-            right.Tail = root.Tail;
-        }
-        left.Next  = right.Number;
-        right.Prev = left.Number;
-        Write(left);
-        Write(right);
-        Own(target, left.Number);
-        Own(target, right.Number);
-
+        var (pieces, lasts) = Split(root, target, keepNumber: false);
         var node = new IndexPage(root.Number, isLeaf: false, root.Raw)
         {
             Tdef  = target.TdefPage,
             Level = root.Level + 1,
-            Tail  = right.Number,
+            Tail  = pieces[^1].Number,
         };
-        node.Entries.Add(new Entry(leftLast.Key, leftLast.RowPtr, left.Number));
-        Write(node);
+        node.Entries.AddRange(lasts.Select((last, i) => new Entry(last.Key, last.RowPtr, pieces[i].Number)));
+        if (Fits(node)) Write(node);
+        else SplitRoot(node, target);
     }
 
     /// <summary>
     /// A node written by an earlier version of this library has an entry for every
     /// child, each with row pointer 0, and no tail: its last child becomes the tail.
-    /// When the tree is being changed (<paramref name="persist"/>), each entry also
+    /// When the tree is being changed (a <paramref name="target"/>), each entry also
     /// takes the row of the last entry under its child, so entries compare as Access's
-    /// do, and the node is written back. A search for a key's first entry (row 0)
+    /// do; its children are written back naming the TDEF, with 0 for no page; and the
+    /// node is written back with its level. A search for a key's first entry (row 0)
     /// goes to the same child either way, so a search reads no more.
     /// </summary>
-    private void UseTail(IndexPage node, bool persist)
+    private void UseTail(IndexPage node, Target? target)
     {
         if (node.Tail > 0 || node.Entries.Count == 0) return;
         node.Tail = node.Entries[^1].SubPage;
         node.Entries.RemoveAt(node.Entries.Count - 1);
-        if (!persist) return;
+        if (target is null) return;
         for (int i = 0; i < node.Entries.Count; i++)
         {
             if (LastEntryUnder(node.Entries[i].SubPage) is { } last)
                 node.Entries[i] = new Entry(last.Key, last.RowPtr, node.Entries[i].SubPage);
         }
+        foreach (int child in node.Entries.Select(e => e.SubPage).Append(node.Tail))
+            Write(ReadFor(target, child));
         node.Level = HeightOf(node);
         Write(node);
     }
@@ -617,10 +647,26 @@ public sealed class IndexWriter
         return page;
     }
 
-    private int Size(IndexPage page) => page.Entries.Sum(e => e.Key.Length) +
-        page.Entries.Count * (page.IsLeaf ? LeafTrailerLen : NodeTrailerLen);
+    /// <summary>
+    /// The bytes every key of a page begins with: those its first and last keys
+    /// share, the keys being in order. Stored once, in the first entry.
+    /// </summary>
+    private static int SharedPrefix(List<Entry> entries)
+    {
+        if (entries.Count < 2) return 0;
+        byte[] first = entries[0].Key, last = entries[^1].Key;
+        int n = Math.Min(first.Length, last.Length), shared = 0;
+        while (shared < n && first[shared] == last[shared]) shared++;
+        return shared;
+    }
 
-    private bool Fits(IndexPage page) => Size(page) <= _format.PageSize - EntriesStart;
+    private static int Size(bool isLeaf, List<Entry> entries) => entries.Sum(e => e.Key.Length)
+        + entries.Count * (isLeaf ? LeafTrailerLen : NodeTrailerLen)
+        - Math.Max(0, entries.Count - 1) * SharedPrefix(entries);
+
+    private bool Fits(bool isLeaf, List<Entry> entries) => Size(isLeaf, entries) <= _format.PageSize - EntriesStart;
+
+    private bool Fits(IndexPage page) => Fits(page.IsLeaf, page.Entries);
 
     private void Write(IndexPage p)
     {
@@ -631,16 +677,22 @@ public sealed class IndexWriter
         ByteUtil.PutInt  (page, _format.OffsetPrevIndexPage,       p.Prev);
         ByteUtil.PutInt  (page, _format.OffsetNextIndexPage,       p.Next);
         ByteUtil.PutInt  (page, _format.OffsetChildTailIndexPage,  p.IsLeaf ? 0 : p.Tail);
-        ByteUtil.PutShort(page, _format.OffsetIndexCompressedByteCount, 0);
+        int shared = SharedPrefix(p.Entries);
+        ByteUtil.PutShort(page, _format.OffsetIndexCompressedByteCount, (short)shared);
         if (HasLevelByte) page[_format.OffsetIndexCompressedByteCount + 2] = (byte)p.Level;
+        if (!Fits(p))
+            throw new InvalidOperationException(
+                $"Index page {p.Number} holds {Size(p.IsLeaf, p.Entries)} bytes of entries; it has room for {_format.PageSize - EntriesStart}.");
 
         Array.Clear(page, _format.OffsetIndexEntryMask, _format.PageSize - _format.OffsetIndexEntryMask);
         int end = 0;
-        foreach (var e in p.Entries)
+        for (int i = 0; i < p.Entries.Count; i++)
         {
+            var e = p.Entries[i];
+            int skip = i == 0 ? 0 : shared;   // the first entry holds the prefix the rest leave out
             int at = EntriesStart + end;
-            Array.Copy(e.Key, 0, page, at, e.Key.Length);
-            at += e.Key.Length;
+            Array.Copy(e.Key, skip, page, at, e.Key.Length - skip);
+            at += e.Key.Length - skip;
             int rowPage = RowPointer.Page(e.RowPtr);
             page[at++] = (byte)(rowPage >> 16);
             page[at++] = (byte)(rowPage >> 8);

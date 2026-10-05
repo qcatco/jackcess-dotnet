@@ -9,7 +9,8 @@ namespace JackcessDotNet.Tests;
 /// catalog sorts text in an order the engine does not key; an index root that moved under a writer holding the old
 /// one; text columns created with no sort order, which Access then keys in another collation; a primary key an
 /// earlier version wrote; a delete or insert that changed a table before finding its key could not be kept; a name a
-/// query already has; and the global usage map read again for every page appended.
+/// query already has; and the global usage map read again for every page appended. With them a guard, which passed
+/// before as it does now: the engine's key for every catalog row is the one Access wrote.
 /// </summary>
 public sealed class EngineReviewTests : IDisposable
 {
@@ -175,7 +176,7 @@ public sealed class EngineReviewTests : IDisposable
         var first = db.GetTable("Keyed");
         var second = db.GetTable("Keyed");
 
-        for (int i = 1; i <= 1500; i++)            // splits the root several times
+        for (int i = 1; i <= 1500; i++)            // the root, a leaf, splits: it moved, before this version
             first.Insert(new Row { ["Id"] = i * 2 });
         for (int i = 1; i <= 1500; i++)
             second.Insert(new Row { ["Id"] = i * 2 + 1 });
@@ -254,6 +255,8 @@ public sealed class EngineReviewTests : IDisposable
         var entries = JetPages.LeafEntries(file, root);
         Assert.Equal(rows.Select(r => (r.Page, r.Row)).OrderBy(p => p), entries.Select(e => (e.RowPage, e.Row)).OrderBy(p => p));
         Assert.Equal("updated", db.GetTable("Keyed").NewIndexCursor().FindRowByPrimaryKey(700)?["Txt"]);
+        // Brought to Access's rules whole: the root's level, and every page naming the TDEF with 0 for no page.
+        Assert.Empty(JetPages.RuleBreaks(file, root, tdef));
     }
 
     // ── A key that cannot be kept ──────────────────────────────────────────

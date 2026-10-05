@@ -31,11 +31,18 @@ internal static class IndexKeys
             ? $"{column.Name} sorts in {column.SortOrder}, and this library writes text keys only in {SortOrder.GeneralLegacy}"
             : $"{column.Name} is a {column.DataType} column, whose keys this library does not write";
 
-    /// <summary>The key of an entry whose columns hold <paramref name="values"/>, in the index's column order.</summary>
+    /// <summary>
+    /// The key of an entry whose columns hold <paramref name="values"/>, in the index's column order. Refuses a
+    /// column whose keys it does not write as Access does (<see cref="CanEncode(Column)"/>), rather than make a key
+    /// no entry of that index has.
+    /// </summary>
     public static byte[] Encode(IReadOnlyList<IndexColumn> columns, IReadOnlyList<object?> values)
     {
         if (values.Count != columns.Count)
             throw new ArgumentException($"The index has {columns.Count} columns; {values.Count} values were given.", nameof(values));
+        foreach (var column in columns)
+            if (!CanEncode(column.Column))
+                throw new NotSupportedException($"No key is made for this index: {WhyNot(column.Column)}.");
         var key = new List<byte>();
         for (int i = 0; i < columns.Count; i++)
             key.AddRange(EncodeColumn(columns[i].Column.DataType, columns[i].IsAscending, values[i]));
