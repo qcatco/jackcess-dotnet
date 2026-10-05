@@ -189,7 +189,7 @@ internal sealed class LvalWriter
             var records = _writer._file.FreedLvalPages;
             if (umap.FreePage <= 0 || !records.FirstLookFor(umap.OwnedPage, umap.OwnedRow))
                 return;
-            var noted = records.Of(umap.OwnedPage, umap.OwnedRow).Select(p => p.Key).ToHashSet();
+            var noted = new HashSet<int>(records.Of(umap.OwnedPage, umap.OwnedRow).Select(p => p.Key));
             byte[] mapPage = _writer._file.ReadPage(umap.FreePage);
             foreach (int page in UsageMap.GetOwnedPages(mapPage, umap.FreeRow, _writer._format, _writer._file))
                 if (!noted.Contains(page))
@@ -244,7 +244,7 @@ internal sealed class LvalWriter
         {
             var umap = _writer._umap;
             var records = _writer._file.FreedLvalPages;
-            var noted = records.Of(umap.OwnedPage, umap.OwnedRow).Select(p => p.Key).ToHashSet();
+            var noted = new HashSet<int>(records.Of(umap.OwnedPage, umap.OwnedRow).Select(p => p.Key));
             foreach (int page in _freedRead)
             {
                 if (!_free.ContainsKey(page))
