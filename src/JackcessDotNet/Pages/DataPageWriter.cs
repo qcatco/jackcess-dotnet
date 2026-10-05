@@ -159,6 +159,10 @@ public sealed class DataPageWriter
     /// Returns the new row's <see cref="RowPointer"/>.
     /// </summary>
     public int UpdateRowByPrimaryKey(TableDefinition table, object primaryKeyValue, Row newValues)
+        => UpdateRowByPrimaryKeyMoving(table, primaryKeyValue, newValues).NewRowPtr;
+
+    /// <summary>As <see cref="UpdateRowByPrimaryKey"/>, with the old row's pointer too: the row moves.</summary>
+    internal (int OldRowPtr, int NewRowPtr) UpdateRowByPrimaryKeyMoving(TableDefinition table, object primaryKeyValue, Row newValues)
     {
         if (table    is null) throw new ArgumentNullException(nameof(table));
         if (newValues is null) throw new ArgumentNullException(nameof(newValues));
@@ -241,9 +245,8 @@ public sealed class DataPageWriter
                 ByteUtil.PutUShort(dp, slotOff, (ushort)(slotVal | 0x8000u));
                 _file.WritePage(pageNum, dp);
 
-                // Insert the merged row and propagate its rowPtr so the caller can
-                // update any PK index that points at the old (now-deleted) row.
-                return InsertRow(table, merged);
+                // Insert the merged row; the caller moves the row's PK entry from the old pointer to the new.
+                return (RowPointer.Pack(pageNum, r), InsertRow(table, merged));
             }
         }
 
@@ -259,6 +262,13 @@ public sealed class DataPageWriter
     /// The caller is responsible for decrementing the TDEF row count.
     /// </summary>
     public void DeleteRow(TableDefinition table, string columnName, object value)
+        => DeleteFirstMatch(table, columnName, value);
+
+    /// <summary>
+    /// As <see cref="DeleteRow"/>, reporting the deleted row: its pointer and its primary-key values, for its
+    /// entry to leave the primary key. Null when no row matched.
+    /// </summary>
+    internal (int RowPtr, object?[] PrimaryKey)? DeleteFirstMatch(TableDefinition table, string columnName, object value)
     {
         if (table is null)      throw new ArgumentNullException(nameof(table));
         if (columnName is null) throw new ArgumentNullException(nameof(columnName));
@@ -311,13 +321,18 @@ public sealed class DataPageWriter
                 object? colVal = decoder.Decode(rowBytes, targetCol);
                 if (!PrimaryKeysEqual(colVal, value)) continue;
 
+                var primaryKey = table.EffectivePrimaryKeyColumns
+                    .Select(name => decoder.Decode(rowBytes, table.Columns.First(c =>
+                        c.Name.Equals(name, StringComparison.OrdinalIgnoreCase))))
+                    .ToArray();
+
                 // Free any LVAL chains referenced by this row.
                 FreeRowLvalChains(table, rowBytes, decoder);
 
                 // Mark the slot as deleted.
                 ByteUtil.PutUShort(dp, slotOff, (ushort)(slotVal | 0x8000u));
                 _file.WritePage(pageNum, dp);
-                return;
+                return (RowPointer.Pack(pageNum, r), primaryKey);
             }
         }
 

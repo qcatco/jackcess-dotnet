@@ -100,18 +100,20 @@ public sealed class Table
     /// <summary>
     /// Updates the row with the given primary-key value.
     /// Old LVAL chunks are freed and their space is reclaimed before the new row is written.
-    /// A new PK index entry is appended pointing at the rewritten row; the old entry is left
-    /// behind as a stale pointer that <see cref="IndexCursor"/> filters out via slot/PK checks.
+    /// The row's primary-key entry moves to the rewritten row, as Access keeps an index.
     /// </summary>
     public void UpdateByPrimaryKey(object primaryKeyValue, Row newValues)
     {
-        int newRowPtr = _dataWriter.UpdateRowByPrimaryKey(_definition, primaryKeyValue, newValues);
+        var (oldRowPtr, newRowPtr) = _dataWriter.UpdateRowByPrimaryKeyMoving(_definition, primaryKeyValue, newValues);
 
         // The merged row that was actually written carries the (unchanged) PK value, so we can
         // index it under primaryKeyValue without inspecting newValues for the PK column.
         if (_definition.PrimaryKeyColumnName is not null && _definition.PrimaryKeyIndexPage > 0)
-            new IndexWriter(_file, _allocator)
-                .InsertPrimaryKey(_definition, primaryKeyValue, newRowPtr);
+        {
+            var writer = new IndexWriter(_file, _allocator);
+            writer.RemovePrimaryKey(_definition, new[] { primaryKeyValue }, oldRowPtr);
+            writer.InsertPrimaryKey(_definition, primaryKeyValue, newRowPtr);
+        }
     }
 
     private void MaybeAddPrimaryKeyIndexEntry(Row row, int rowPtr)
@@ -149,8 +151,12 @@ public sealed class Table
     /// </summary>
     public void DeleteRow(string columnName, object value)
     {
-        _dataWriter.DeleteRow(_definition, columnName, value);
+        var deleted = _dataWriter.DeleteFirstMatch(_definition, columnName, value);
         _dataWriter.IncrementTdefRowCount(_definition.TdefPageNumber, -1);
+
+        // Its primary-key entry goes with it: Access counts and finds rows through the key.
+        if (deleted is { } row && _definition.PrimaryKeyIndexPage > 0 && row.PrimaryKey.All(v => v is not null))
+            new IndexWriter(_file, _allocator).RemovePrimaryKey(_definition, row.PrimaryKey, row.RowPtr);
     }
 
     /// <summary>

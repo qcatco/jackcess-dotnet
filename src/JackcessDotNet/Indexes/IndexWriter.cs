@@ -112,6 +112,19 @@ public sealed class IndexWriter
         table.PrimaryKeyIndexPage = target.RootPage;
     }
 
+    /// <summary>
+    /// Takes the entry for <paramref name="values"/> at <paramref name="rowPointer"/> out of the table's primary
+    /// key: a row deleted, or moved by an update. May move the root, as <see cref="InsertPrimaryKey(TableDefinition, IReadOnlyList{object?}, int)"/> may.
+    /// </summary>
+    internal void RemovePrimaryKey(TableDefinition table, IReadOnlyList<object?> values, int rowPointer)
+    {
+        if (table.PrimaryKeyIndexPage == 0) return;
+        var target = new Target(table.TdefPageNumber, table.PrimaryKeyIndexDataNumber, table.PrimaryKeyIndexPage,
+                                table.PrimaryKeyIndexUmapPage, table.PrimaryKeyIndexUmapRow);
+        Remove(target, PrimaryKeyBytes(table, values), rowPointer);
+        table.PrimaryKeyIndexPage = target.RootPage;
+    }
+
     // The primary key's columns: from the index on disk when the table was read,
     // or from its definition (ascending) when this library made it.
     private static IReadOnlyList<IndexColumn> PrimaryKeyColumns(TableDefinition table)
@@ -222,6 +235,101 @@ public sealed class IndexWriter
             parent.Level = child.Level + 1;
             child = parent;
         }
+    }
+
+    /// <summary>
+    /// Takes the entry (<paramref name="key"/>, <paramref name="rowPointer"/>) out of the tree, as Access and
+    /// Jackcess do: a page left empty leaves the tree and its level's chain (a tail leaving its node, the node's
+    /// last entry's child becomes the tail), an entry copying the last entry under a page follows it when that
+    /// changes, and a root left with one child gives way to it. An entry the tree does not hold is no change.
+    /// </summary>
+    internal void Remove(Target target, byte[] key, int rowPointer)
+    {
+        var entry = new Entry(key, rowPointer, 0);
+        var path  = new List<(IndexPage Node, int Slot)>();   // Slot -1: the node's tail
+
+        var page = Read(target.RootPage);
+        while (!page.IsLeaf)
+        {
+            UseTail(page);
+            int slot = FirstAtLeast(page.Entries, entry);
+            path.Add((page, slot));
+            page = Read(slot >= 0 ? page.Entries[slot].SubPage : page.Tail);
+        }
+        int at = page.Entries.FindIndex(e => Compare(e, entry) == 0);
+        if (at < 0) return;
+        page.Entries.RemoveAt(at);
+        page.Level = 0;
+
+        // The last entry under the page, when the removal changed it.
+        Entry? newLast = at == page.Entries.Count && page.Entries.Count > 0 ? page.Entries[^1] : null;
+
+        // An empty page leaves the tree; its parent loses the entry for it, or its tail.
+        var child = page;
+        int depth = path.Count;
+        while (depth > 0 && child.Entries.Count == 0 && (child.IsLeaf || child.Tail <= 0))
+        {
+            Drop(child, target);
+            var (parent, slot) = path[depth - 1];
+            if (slot >= 0)
+            {
+                parent.Entries.RemoveAt(slot);
+                newLast = null;   // the parent's tail still holds what is last under it
+            }
+            else if (parent.Entries.Count > 0)
+            {
+                var last = parent.Entries[^1];
+                parent.Entries.RemoveAt(parent.Entries.Count - 1);
+                parent.Tail = last.SubPage;
+                newLast = last;
+            }
+            else
+            {
+                parent.Tail = 0;
+                newLast = null;
+            }
+            child = parent;
+            depth--;
+        }
+
+        if (depth == 0 && !child.IsLeaf && child.Entries.Count == 0)
+        {
+            // A root with one child gives way to it; a root with none is an empty leaf again.
+            if (child.Tail > 0)
+            {
+                Drop(child, target);
+                target.RootPage = child.Tail;
+                PatchTdefRoot(target);
+            }
+            else
+            {
+                Write(new IndexPage(child.Number, isLeaf: true, child.Raw) { Tdef = child.Tdef });
+            }
+            return;
+        }
+        Write(child);
+
+        // The first ancestor naming the page in an entry copies its new last entry.
+        if (newLast is { } changed)
+        {
+            for (int d = depth - 1; d >= 0; d--)
+            {
+                var (parent, slot) = path[d];
+                if (slot < 0) continue;
+                parent.Entries[slot] = new Entry(changed.Key, changed.RowPtr, parent.Entries[slot].SubPage);
+                Write(parent);
+                break;
+            }
+        }
+    }
+
+    // A page leaving the tree: out of its level's chain and its index's usage map.
+    private void Drop(IndexPage page, Target target)
+    {
+        if (page.Prev > 0) PatchLink(page.Prev, _format.OffsetNextIndexPage, page.Next);
+        if (page.Next > 0) PatchLink(page.Next, _format.OffsetPrevIndexPage, page.Prev);
+        if (target.UmapPage > 0)
+            UsageMap.RemovePage(_file, target.UmapPage, target.UmapRow, page.Number);
     }
 
     /// <summary>
