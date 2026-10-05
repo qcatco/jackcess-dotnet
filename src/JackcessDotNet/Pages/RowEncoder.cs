@@ -44,6 +44,8 @@ public sealed class RowEncoder
         if (row is null)
             throw new ArgumentNullException(nameof(row));
 
+        Validate(row);
+
         int maxRowSize = _format.MaxRowSize;
         var buffer = new byte[maxRowSize];
         int pos = 0;
@@ -225,6 +227,26 @@ public sealed class RowEncoder
     }
 
     // ── Long-value helpers ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Throws when a Text value is longer than its column allows, as Access does, before anything of the row is
+    /// written. Written whole, ACE reads such a value cut to the column's length and a typed reader refuses the table.
+    /// A Jet4 Text column's length is in bytes, two to a character; a Jet3 one's is in characters. An update calls it
+    /// before it deletes the row it replaces.
+    /// </summary>
+    internal void Validate(Row row)
+    {
+        foreach (var col in _columns)
+        {
+            if (col.DataType != DataType.Text || col.Length <= 0) continue;
+            if (!row.TryGetValue(col.Name, out var value) || value is null) continue;
+
+            int maxChars = _format.Version == JetVersion.Jet3 ? col.Length : col.Length / 2;
+            string text = Convert.ToString(value) ?? string.Empty;
+            if (text.Length > maxChars)
+                throw new ColumnValueTooLongException(col.Name, maxChars, text.Length);
+        }
+    }
 
     /// <summary>
     /// Builds a THIS_PAGE inline LvRef in the REAL Jet format (matches Java

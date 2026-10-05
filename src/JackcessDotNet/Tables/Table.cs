@@ -25,6 +25,9 @@ public sealed class Table
         _owningDb    = owningDb;
     }
 
+    /// <summary>The table's definition, for tests that look at its pages.</summary>
+    internal TableDefinition Definition => _definition;
+
     // ── Public properties ─────────────────────────────────────────────────────
 
     public string                Name    => _definition.Name;
@@ -80,6 +83,18 @@ public sealed class Table
         int rowPtr = _dataWriter.InsertRow(_definition, row);
         _dataWriter.IncrementTdefRowCount(_definition.TdefPageNumber);
         MaybeAddPrimaryKeyIndexEntry(row, rowPtr);
+    }
+
+    /// <summary>
+    /// Checks <paramref name="row"/> against the table's columns without writing it: throws
+    /// <see cref="ColumnValueTooLongException"/> for a Text value longer than its column, as <see cref="Insert"/>
+    /// would. A caller writing many rows can check them all first, so a refused value stops the batch before any of
+    /// it is in the file.
+    /// </summary>
+    public void Validate(Row row)
+    {
+        if (row is null) throw new ArgumentNullException(nameof(row));
+        new RowEncoder(_file.Format, _definition.Columns).Validate(row);
     }
 
     /// <summary>

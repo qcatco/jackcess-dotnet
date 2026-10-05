@@ -20,6 +20,9 @@ public sealed class Database : IDisposable
 {
     private readonly PageFile      _file;
     private readonly PageAllocator _allocator;
+
+    /// <summary>The open file, for tests that look at its pages.</summary>
+    internal PageFile File => _file;
     private readonly SystemCatalog _catalog;
     private IReadOnlyList<Relationship>? _relsCache;
 

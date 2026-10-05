@@ -68,7 +68,7 @@ public sealed class DataPageWriter
         int dataPage   = FindOrAllocateDataPage(tableDef, rowData.Length, format);
         int rowNum     = WriteRowOnPage(dataPage, rowData, tableDef.TdefPageNumber, format);
 
-        return (dataPage << 16) | rowNum;
+        return RowPointer.Pack(dataPage, rowNum);
     }
 
     /// <summary>
@@ -86,27 +86,33 @@ public sealed class DataPageWriter
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The most rows a page may hold: Jet addresses a row on its page with one byte (Jackcess's
+    /// MAX_NUM_ROWS_ON_DATA_PAGE).
+    /// </summary>
+    internal const int MaxRowsPerPage = 255;
+
     private int FindOrAllocateDataPage(TableDefinition tableDef, int rowDataSize, JetFormat format)
     {
         int needed = rowDataSize + JetFormat.SizeRowEntry;   // data bytes + one slot
 
-        // Consult the owned-pages usage-map for existing pages with enough room.
-        byte[] umapPage  = _file.ReadPage(tableDef.UmapPageNumber);
-        var    ownedList = UsageMap.GetOwnedPages(umapPage, tableDef.OwnedPagesRow, format, _file);
-
-        foreach (int pageNum in ownedList)
+        // The table's last page, when it is one of its data pages with room - as Access and Java Jackcess add rows.
+        // Looking through every owned page for room read the whole table on every insert, so each insert was
+        // slower than the last, and it put rows ahead of rows inserted before them.
+        int last = UsageMap.GetLastPage(_file, tableDef.UmapPageNumber, tableDef.OwnedPagesRow);
+        if (last >= 0)
         {
-            var   dp        = _file.ReadPage(pageNum);
-            short freeSpace = ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace);
-            if (freeSpace >= needed)
-                return pageNum;
+            byte[] dp = _file.ReadPage(last);
+            if (dp[0] == JetFormat.PageTypeData
+                && ByteUtil.GetInt(dp, JetFormat.OffsetDataTdefPage) == tableDef.TdefPageNumber
+                && ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace) >= needed
+                && ByteUtil.GetShort(dp, format.OffsetDataNumRows) < MaxRowsPerPage)
+                return last;
         }
 
         // Allocate a fresh data page and register it in the usage-map.
         int newPage = _allocator.AllocateDataPage(tableDef.TdefPageNumber);
-        umapPage = _file.ReadPage(tableDef.UmapPageNumber);  // re-read (may have been evicted)
-        UsageMap.AddPage(umapPage, tableDef.OwnedPagesRow, newPage, format);
-        _file.WritePage(tableDef.UmapPageNumber, umapPage);
+        UsageMap.AddPage(_file, _allocator, tableDef.UmapPageNumber, tableDef.OwnedPagesRow, newPage);
 
         return newPage;
     }
@@ -121,6 +127,9 @@ public sealed class DataPageWriter
         if (freeSpace < needed)
             throw new InvalidOperationException(
                 $"Data page {pageNumber} has only {freeSpace} free bytes; row needs {needed}.");
+        if (rowCount >= MaxRowsPerPage)
+            throw new InvalidOperationException(
+                $"Data page {pageNumber} already holds {rowCount} rows, the most a page can.");
 
         // cursor = first byte of the free gap (grows up), which also equals the
         // left-edge of the already-written data area when rearranged:
@@ -149,7 +158,7 @@ public sealed class DataPageWriter
     /// Finds the row whose primary-key column equals <paramref name="primaryKeyValue"/>
     /// (linear scan of all owned data pages), merges <paramref name="newValues"/> into it,
     /// marks the old row as deleted, and re-inserts the merged row.
-    /// Returns the packed rowPtr of the new row: <c>pageNumber &lt;&lt; 16 | rowIndex</c>.
+    /// Returns the new row's <see cref="RowPointer"/>.
     /// </summary>
     public int UpdateRowByPrimaryKey(TableDefinition table, object primaryKeyValue, Row newValues)
     {
@@ -223,8 +232,12 @@ public sealed class DataPageWriter
                 foreach (var kvp in newValues)
                     merged[kvp.Key] = kvp.Value;
 
+                // A merged row the new one could not be written as - text longer than its column - must not cost
+                // the row it replaces, so it is checked before anything is freed or deleted.
+                new RowEncoder(format, columns).Validate(merged);
+
                 // Free any LVAL chains referenced by the old row before overwriting.
-                FreeRowLvalChains(rowBytes, decoder);
+                FreeRowLvalChains(table, rowBytes, decoder);
 
                 // Mark the original slot as deleted (bit 15).
                 ByteUtil.PutUShort(dp, slotOff, (ushort)(slotVal | 0x8000u));
@@ -301,7 +314,7 @@ public sealed class DataPageWriter
                 if (!PrimaryKeysEqual(colVal, value)) continue;
 
                 // Free any LVAL chains referenced by this row.
-                FreeRowLvalChains(rowBytes, decoder);
+                FreeRowLvalChains(table, rowBytes, decoder);
 
                 // Mark the slot as deleted.
                 ByteUtil.PutUShort(dp, slotOff, (ushort)(slotVal | 0x8000u));
@@ -316,12 +329,16 @@ public sealed class DataPageWriter
 
     // ── Shared helpers ────────────────────────────────────────────────────────
 
-    // Frees every OTHER_PAGE LVAL chain referenced by the given row bytes.
-    private void FreeRowLvalChains(byte[] rowBytes, RowDecoder decoder)
+    // Frees every OTHER_PAGE LVAL chain referenced by the given row bytes. The room each page gains is noted for the
+    // column the value was in (its owned-pages map), whose later values may use it.
+    private void FreeRowLvalChains(TableDefinition table, byte[] rowBytes, RowDecoder decoder)
     {
         var lvalFree = new LvalFree(_file);
-        foreach (var (lvalPage, lvalRow, chained) in decoder.GetOtherPageLvRefs(rowBytes))
-            lvalFree.FreeChain(lvalPage, lvalRow, chained);
+        foreach (var (column, lvalPage, lvalRow, chained) in decoder.GetOtherPageLvRefs(rowBytes))
+        {
+            LvalUmapRef? owner = table.LvalColumnUmapPages.TryGetValue(column.Name, out var umap) ? umap : null;
+            lvalFree.FreeChain(lvalPage, lvalRow, chained, owner);
+        }
     }
 
     private static bool PrimaryKeysEqual(object? stored, object? requested)

@@ -12,6 +12,16 @@ public sealed class PageFile : IDisposable
     public long Length => _stream.Length;
     public int PageCount => (int)(_stream.Length / _format.PageSize);
 
+    /// <summary>Pages read since the file was opened: what tests measure an operation's cost in.</summary>
+    internal long ReadCount { get; private set; }
+
+    /// <summary>
+    /// LVAL pages whose space a deleted long value freed in this session (LvalFree), by column, for that column's later
+    /// values to use again (LvalWriter). A hint: a page is read, and checked against the writing column's usage map,
+    /// before any row goes onto it.
+    /// </summary>
+    internal FreedLvalPages FreedLvalPages { get; } = new FreedLvalPages();
+
     /// <summary>
     /// Per-page codec applied on every Read/Write. Default is the identity
     /// (<see cref="NullCodecHandler.Instance"/>); <see cref="Database.Open"/> may
@@ -45,6 +55,7 @@ public sealed class PageFile : IDisposable
             throw new EndOfStreamException($"Page {pageNumber} is beyond end of file.");
 
         var buffer = new byte[_format.PageSize];
+        ReadCount++;
         _stream.Seek(offset, SeekOrigin.Begin);
         int read = 0;
         while (read < buffer.Length)

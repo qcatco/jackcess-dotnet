@@ -70,8 +70,8 @@ public sealed class IndexCursor : Cursor
             foreach (int rowPtr in iw.EnumerateRowPointersForKey(_definition, value))
             {
                 // pageNum is the upper 24 bits (3-byte LE page) and rowNum the low byte.
-                int pageNum = (rowPtr >> 16) & 0xFFFFFF;
-                int rowIdx  = rowPtr        & 0xFF;
+                int pageNum = RowPointer.Page(rowPtr);
+                int rowIdx  = RowPointer.Row(rowPtr);
 
                 // Defensive: only attempt to materialise the row if pageNum points to
                 // a real data page. Spurious "matches" against compressed Access leaves
@@ -95,8 +95,8 @@ public sealed class IndexCursor : Cursor
             var reader = new IndexReader(_file, diskIx!);
             foreach (int rowPtr in reader.FindRowPointers(value))
             {
-                int pageNum = (rowPtr >> 16) & 0xFFFFFF;
-                int rowIdx  = rowPtr        & 0xFF;
+                int pageNum = RowPointer.Page(rowPtr);
+                int rowIdx  = RowPointer.Row(rowPtr);
                 Row? r = ReadRowAt(pageNum, rowIdx);
                 if (r is null) continue;
                 if (r.TryGetValue(columnName, out var stored) && ValuesEqual(stored, value))
@@ -160,8 +160,8 @@ public sealed class IndexCursor : Cursor
             {
                 foreach (int rowPtr in reader.FindRowPointersForEntry(entryValues!))
                 {
-                    int pageNum = (rowPtr >> 16) & 0xFFFFFF;
-                    int rowIdx  = rowPtr        & 0xFF;
+                    int pageNum = RowPointer.Page(rowPtr);
+                    int rowIdx  = RowPointer.Row(rowPtr);
                     Row? r = ReadRowAt(pageNum, rowIdx);
                     if (r is null) continue;
                     if (RowMatchesEntry(r, ix, entryValues))

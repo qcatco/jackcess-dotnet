@@ -357,7 +357,7 @@ public sealed class IndexWriter
                     }
                     var raw = new byte[entryLen];
                     Array.Copy(page, entryAbs, raw, 0, entryLen);
-                    result.Add(new RawEntry(key, raw, (pgBE << 16) | row, subPage));
+                    result.Add(new RawEntry(key, raw, RowPointer.Pack(pgBE, row), subPage));
                 }
                 lastStart = endOffset;
             }
@@ -413,8 +413,8 @@ public sealed class IndexWriter
 
     private static RawEntry BuildLeafEntry(byte[] keyBytes, int rowPointer)
     {
-        int pageNum = (rowPointer >> 16) & 0xFFFFFF;
-        int rowNum  = rowPointer & 0xFF;
+        int pageNum = RowPointer.Page(rowPointer);
+        int rowNum  = RowPointer.Row(rowPointer);
         var raw = new byte[keyBytes.Length + LeafTrailerLen];
         Array.Copy(keyBytes, raw, keyBytes.Length);
         raw[keyBytes.Length    ] = (byte)((pageNum >> 16) & 0xFF);

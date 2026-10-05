@@ -228,8 +228,8 @@ public sealed class PkIndexRoundTripTests : IDisposable
             foreach (var rowPtr in reader.FindRowPointers(probe))
             {
                 hits++;
-                int pageNum = (rowPtr >> 16) & 0xFFFFFF;
-                int rowIdx  = rowPtr        & 0xFF;
+                int pageNum = RowPointer.Page(rowPtr);
+                int rowIdx  = RowPointer.Row(rowPtr);
                 Assert.True(pageNum > 0);
                 Assert.True(rowIdx >= 0 && rowIdx < 256);
             }
