@@ -32,6 +32,17 @@ public sealed class Index
     /// <summary>Index type byte from the logical-index slot (1 = primary key, 2 = foreign key, 0 = regular).</summary>
     public byte IndexType { get; }
 
+    /// <summary>
+    /// The index's block among the TDEF's index blocks (its index data number):
+    /// where its root page is recorded. Not the same as <see cref="IndexNumber"/>:
+    /// MSysObjects lists Id first and keeps ParentIdName's block first.
+    /// </summary>
+    internal int IndexDataNumber { get; }
+
+    /// <summary>The usage map listing the index's pages: its page (0 when it has none) and row.</summary>
+    internal int UsedPagesUmapPage { get; }
+    internal int UsedPagesUmapRow  { get; }
+
     public bool IsPrimaryKey => IndexType == 1;
     public bool IsForeignKey => IndexType == 2;
     public bool IsUnique     => IsPrimaryKey || (Flags & 0x01) != 0;
@@ -39,14 +50,18 @@ public sealed class Index
     public bool IsRequired   => (Flags & 0x08) != 0;
 
     internal Index(string name, IReadOnlyList<IndexColumn> columns, int rootPageNumber,
-                   int indexNumber, byte flags, byte indexType)
+                   int indexNumber, byte flags, byte indexType,
+                   int indexDataNumber = 0, int usedPagesUmapPage = 0, int usedPagesUmapRow = 0)
     {
-        Name           = name;
-        Columns        = columns;
-        RootPageNumber = rootPageNumber;
-        IndexNumber    = indexNumber;
-        Flags          = flags;
-        IndexType      = indexType;
+        Name              = name;
+        Columns           = columns;
+        RootPageNumber    = rootPageNumber;
+        IndexNumber       = indexNumber;
+        Flags             = flags;
+        IndexType         = indexType;
+        IndexDataNumber   = indexDataNumber;
+        UsedPagesUmapPage = usedPagesUmapPage;
+        UsedPagesUmapRow  = usedPagesUmapRow;
     }
 
     public override string ToString()

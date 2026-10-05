@@ -161,6 +161,8 @@ internal sealed class LvalWriter
         // page already read is not read again.
         private int FreedPageWithRoom(int needed)
         {
+            if (_freed is null)
+                NoteFreeSpaceMap();
             if (_freed is null || needed < _freedWalkedFor)
             {
                 _freed = _writer._file.FreedLvalPages.Of(_writer._umap.OwnedPage, _writer._umap.OwnedRow).GetEnumerator();
@@ -179,6 +181,21 @@ internal sealed class LvalWriter
             return -1;
         }
 
+        // The first look in a session notes the pages the column's free-space map lists - room a delete left in an
+        // earlier session - to be read for their room when a chunk could fit.
+        private void NoteFreeSpaceMap()
+        {
+            var umap = _writer._umap;
+            var records = _writer._file.FreedLvalPages;
+            if (umap.FreePage <= 0 || !records.FirstLookFor(umap.OwnedPage, umap.OwnedRow))
+                return;
+            var noted = new HashSet<int>(records.Of(umap.OwnedPage, umap.OwnedRow).Select(p => p.Key));
+            byte[] mapPage = _writer._file.ReadPage(umap.FreePage);
+            foreach (int page in UsageMap.GetOwnedPages(mapPage, umap.FreeRow, _writer._format, _writer._file))
+                if (!noted.Contains(page))
+                    records.Set(umap.OwnedPage, umap.OwnedRow, page, FreedLvalPages.NotYetRead);
+        }
+
         private int LastPageWithRoom(int needed)
         {
             if (_lastPageRead)
@@ -191,9 +208,8 @@ internal sealed class LvalWriter
         private int NewPage()
         {
             // A fresh LVAL data page (it carries the "LVAL" signature Access requires at bytes 4-7).
-            // TODO: also track the page in the free-space umap (_umap.FreePage/FreeRow) like real
-            // Access; readers follow direct LvRef pointers, so omitting it costs only reuse
-            // efficiency, not correctness.
+            // It is not added to the column's free-space map: the column's last page is always
+            // looked at, and only the pages a delete freed are listed there.
             int page = _writer._allocator.AllocateLvalPage();
             UsageMap.AddPage(_writer._file, _writer._allocator, _writer._umap.OwnedPage, _writer._umap.OwnedRow, page);
             _free[page] = _writer._format.DataPageInitialFreeSpace;
@@ -228,15 +244,27 @@ internal sealed class LvalWriter
         {
             var umap = _writer._umap;
             var records = _writer._file.FreedLvalPages;
+            var noted = new HashSet<int>(records.Of(umap.OwnedPage, umap.OwnedRow).Select(p => p.Key));
             foreach (int page in _freedRead)
             {
                 if (!_free.ContainsKey(page))
-                    records.Set(umap.OwnedPage, umap.OwnedRow, page, 0);
+                    Forget(page);
             }
             foreach (var entry in _free)
             {
                 int room = _rows[entry.Key] < DataPageWriter.MaxRowsPerPage ? entry.Value : 0;
-                records.Renew(umap.OwnedPage, umap.OwnedRow, entry.Key, room);
+                if (room < FreedLvalPages.MinUsefulFreeSpace && noted.Contains(entry.Key))
+                    Forget(entry.Key);
+                else
+                    records.Renew(umap.OwnedPage, umap.OwnedRow, entry.Key, room);
+            }
+
+            // A page with no room worth reading, or not this column's, leaves the notes and the free-space map.
+            void Forget(int page)
+            {
+                records.Set(umap.OwnedPage, umap.OwnedRow, page, 0);
+                if (umap.FreePage > 0)
+                    UsageMap.RemovePage(_writer._file, umap.FreePage, umap.FreeRow, page);
             }
         }
     }
@@ -407,7 +435,8 @@ internal sealed class LvalFree
     /// <paramref name="chained"/> selects OTHER_PAGES chain walking
     /// ([nextRow:1][nextPage:3] prefix, nextPage == 0 ends) vs a single
     /// OTHER_PAGE chunk. A page left with more room is noted in <see cref="PageFile.FreedLvalPages"/> for the column
-    /// whose usage maps <paramref name="owner"/> names, when it has them.
+    /// whose usage maps <paramref name="owner"/> names, when it has them, and added to that column's free-space map
+    /// as Access lists such a page.
     /// </summary>
     public void FreeChain(int lvalPage, int lvalRow, bool chained, LvalUmapRef? owner)
     {
@@ -445,7 +474,11 @@ internal sealed class LvalFree
             _file.WritePage(curPage, page);
             short freeAfter = ByteUtil.GetShort(page, JetFormat.OffsetDataFreeSpace);
             if (owner is { } column && freeAfter > freeBefore)
+            {
                 _file.FreedLvalPages.Set(column.OwnedPage, column.OwnedRow, curPage, freeAfter);
+                if (column.FreePage > 0 && freeAfter >= FreedLvalPages.MinUsefulFreeSpace)
+                    UsageMap.AddPage(_file, new PageAllocator(_file), column.FreePage, column.FreeRow, curPage);
+            }
 
             if (!hasNext) break;
             curPage = nextPage;

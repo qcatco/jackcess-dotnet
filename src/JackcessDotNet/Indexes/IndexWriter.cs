@@ -3,66 +3,75 @@ using JackcessDotNet.Util;
 namespace JackcessDotNet;
 
 /// <summary>
-/// Writes B-tree index pages in real Access on-disk format and maintains the tree
-/// shape across inserts.
+/// Adds entries to an index's B-tree the way Access writes one, so Access reads
+/// the tree and can go on adding to it: the primary key of a table this library
+/// creates, and MSysObjects' and MSysACEs' indexes when it creates a table.
 ///
-/// Tree shape produced today:
-///   • Root starts as a leaf page (type 0x04) for small indexes that fit on one page.
-///   • On the first leaf overflow, root is promoted to a node page (type 0x03)
-///     pointing at the original leaf (now left half) plus the new sibling leaf
-///     (right half).
-///   • Subsequent overflows split a leaf, update the corresponding node entry's
-///     key to the new left-max, and add a new node entry for the right sibling.
-///   • The depth is currently capped at 2 (root node + leaves). When the root
-///     node itself fills, we throw — a 3-level tree needs recursive node splits,
-///     deferred to a future slice.
+/// Access's rules, as its own pages show them:
+///   • A leaf's entries are sorted by key, then by row pointer; each is the key
+///     followed by the row's page (3 bytes, big-endian) and row (1 byte).
+///   • A node holds, for each child but its last, a copy of the last entry under
+///     that child followed by the child's page (4 bytes, big-endian). The last
+///     child has no entry: the node's tail pointer leads to it.
+///   • Every level is a list linked through prev/next; 0 is "no page".
+///   • A page's header names its table's TDEF page and (Jet4) its height above
+///     the leaves.
+///   • Every page of an index is in the index's used-pages usage map.
 ///
-/// Within a single page:
-///   • Leaves carry entries sorted ascending by key bytes (so Access can binary-
-///     search them).
-///   • Node entries are also sorted; each entry's key is the LARGEST key in its
-///     subtree (matches the descent convention <see cref="IndexReader"/> uses).
+/// A page stores the bytes all its keys begin with once, as Access does: the first
+/// entry is written in full, the rest without that prefix, whose length the page
+/// header holds (Jackcess takes it the same way, from the first and last keys).
+/// A full Access page holds more entries than would fit written out in full, so
+/// every page is written that way. A page that does not fit, after any change,
+/// splits - in two, or, where a key sharing nothing with its neighbours undoes the
+/// packing, into as many pieces as halving takes - and its parent gains an entry
+/// for each new piece; a parent that overflows splits the same way. The root keeps
+/// its page, as Jackcess's does: when it splits, its entries move to new pages
+/// beneath it and it becomes the node above them, and a root left with one child
+/// takes that child's entries back, as often as that leaves it with one child. So
+/// the TDEF's root, and every copy of it a reader or writer holds, stays right.
 ///
-/// On a root change (initial leaf-to-node promotion), the index's
-/// <c>rootPage</c> field inside the TDEF's index column block is patched so the
-/// next <see cref="Database.Open"/> sees the new root.
+/// Pages written by earlier versions of this library (an entry for every child,
+/// each with row pointer 0, and no tail; 0xFFFFFFFF for "no page"; no TDEF named)
+/// are read either way and brought to these rules, children and all, when the
+/// tree is changed.
 /// </summary>
 public sealed class IndexWriter
 {
-    private const int  NoPage         = unchecked((int)0xFFFFFFFF);
-    private const byte AscStartFlag   = 0x7F;
-    private const int  LeafTrailerLen = 4;   // 3-byte BE page + 1-byte row
-    private const int  NodeTrailerLen = 8;   // leaf trailer + 4-byte BE sub-page
+    private const int LeafTrailerLen = 4;   // 3-byte BE page + 1-byte row
+    private const int NodeTrailerLen = 8;   // leaf trailer + 4-byte BE child page
+    private const int OffsetTdefPage = 4;
+    private const int OldNoPage      = unchecked((int)0xFFFFFFFF);
 
     private readonly PageFile      _file;
     private readonly PageAllocator _allocator;
+    private readonly JetFormat     _format;
 
     public IndexWriter(PageFile file, PageAllocator allocator)
     {
         _file      = file      ?? throw new ArgumentNullException(nameof(file));
         _allocator = allocator ?? throw new ArgumentNullException(nameof(allocator));
+        _format    = file.Format;
     }
 
-    // ── Public API ────────────────────────────────────────────────────────────
+    // ── Primary keys ─────────────────────────────────────────────────────────
 
     /// <summary>Allocates a fresh, empty leaf page and returns its page number.</summary>
-    public int CreateEmptyLeafPage()
+    public int CreateEmptyLeafPage() => CreateEmptyLeafPage(tdefPage: 0);
+
+    internal int CreateEmptyLeafPage(int tdefPage)
     {
-        int pn = _allocator.AllocatePage();
-        _file.WritePage(pn, BuildEmptyIndexPage(_file.Format, isLeaf: true));
-        return pn;
+        var page = new IndexPage(_allocator.AllocatePage(), isLeaf: true, raw: null) { Tdef = tdefPage };
+        Write(page);
+        return page.Number;
     }
 
     public int CreatePrimaryKeyIndex(TableDefinition table, string indexName)
-        => CreateEmptyLeafPage();
+        => CreateEmptyLeafPage(table.TdefPageNumber);
 
-    /// <summary>
-    /// Composite-PK companion to <see cref="CreatePrimaryKeyIndex(TableDefinition, string)"/>.
-    /// The index layout is identical to a single-column PK — the difference is
-    /// only in how key bytes get encoded on insertion.
-    /// </summary>
+    /// <summary>Composite-key companion of <see cref="CreatePrimaryKeyIndex(TableDefinition, string)"/>.</summary>
     public int CreatePrimaryKeyIndex(TableDefinition table, IReadOnlyList<string> pkColumns)
-        => CreateEmptyLeafPage();
+        => CreateEmptyLeafPage(table.TdefPageNumber);
 
     public int? FindRowByPrimaryKey(TableDefinition table, object primaryKeyValue)
     {
@@ -71,413 +80,665 @@ public sealed class IndexWriter
         return null;
     }
 
-    /// <summary>
-    /// Composite-PK variant of <see cref="FindRowByPrimaryKey"/>. Encodes all
-    /// values together and searches the tree once for the concatenated key.
-    /// </summary>
+    /// <summary>Composite-key variant of <see cref="FindRowByPrimaryKey(TableDefinition, object)"/>.</summary>
     public int? FindRowByPrimaryKey(TableDefinition table, IReadOnlyList<object?> values)
     {
-        byte[] key = EncodeCompositeKeyBytes(values);
-        foreach (int rowPtr in EnumerateRowPointersForKeyBytes(table, key))
+        if (table.PrimaryKeyIndexPage == 0) return null;
+        foreach (int rowPtr in RowPointersForKey(table.PrimaryKeyIndexPage, PrimaryKeyBytes(table, values)))
             return rowPtr;
         return null;
     }
 
     /// <summary>
-    /// Walks the tree rooted at <see cref="TableDefinition.PrimaryKeyIndexPage"/>
-    /// and yields rowPtrs for every entry whose key bytes equal the encoded form
-    /// of <paramref name="primaryKeyValue"/>. Visits siblings via the leaf chain
-    /// after the first matching leaf so duplicate keys (left by Update/Delete) are
-    /// all reported.
+    /// Every row pointer the primary key holds under <paramref name="primaryKeyValue"/>,
+    /// including those an update left behind (callers check the row).
     /// </summary>
     public IEnumerable<int> EnumerateRowPointersForKey(TableDefinition table, object primaryKeyValue)
-        => EnumerateRowPointersForKeyBytes(table, EncodeKeyBytes(primaryKeyValue));
-
-    /// <summary>
-    /// Internal scan over the B-tree for the encoded key bytes. Shared between
-    /// the single-column and composite-PK lookup paths.
-    /// </summary>
-    private IEnumerable<int> EnumerateRowPointersForKeyBytes(TableDefinition table, byte[] search)
     {
-        if (table.PrimaryKeyIndexPage == 0) yield break;
-        var format = _file.Format;
-
-        // Descend from root to the leaf that should contain the key.
-        int curLeaf = DescendToLeaf(table.PrimaryKeyIndexPage, search);
-        while (curLeaf > 0 && curLeaf != NoPage)
-        {
-            byte[] page = _file.ReadPage(curLeaf);
-            foreach (var entry in ReadEntries(page, format, isLeaf: true))
-            {
-                if (entry.KeyBytes.Length != search.Length) continue;
-                bool match = true;
-                for (int i = 0; i < search.Length; i++)
-                    if (entry.KeyBytes[i] != search[i]) { match = false; break; }
-                if (match) yield return entry.RowPtr;
-            }
-            int next = ByteUtil.GetInt(page, format.OffsetNextIndexPage);
-            if (next == NoPage) break;
-            // Stop scanning siblings once the leaf's first key is past the search key
-            // (entries are sorted ascending — no further matches possible).
-            curLeaf = next;
-            byte[] nextPage = _file.ReadPage(curLeaf);
-            var firstEntry = ReadEntries(nextPage, format, isLeaf: true).FirstOrDefault();
-            if (firstEntry.KeyBytes is null) break;
-            if (CompareBytes(firstEntry.KeyBytes, search) > 0) break;
-        }
+        if (table.PrimaryKeyIndexPage == 0) return Array.Empty<int>();
+        return RowPointersForKey(table.PrimaryKeyIndexPage, PrimaryKeyBytes(table, new[] { primaryKeyValue }));
     }
 
     /// <summary>
-    /// Inserts a new (key, rowPtr) pair into the B-tree, splitting + promoting
-    /// when necessary. May change <see cref="TableDefinition.PrimaryKeyIndexPage"/>
-    /// if the root splits.
+    /// Adds a (key, row) entry to the table's primary key. The root stays on its page
+    /// (see the class summary), so <see cref="TableDefinition.PrimaryKeyIndexPage"/> and
+    /// the TDEF stay right, for this table object and any other.
     /// </summary>
     public void InsertPrimaryKey(TableDefinition table, object primaryKeyValue, int rowPointer)
-        => InsertPrimaryKeyBytes(table, EncodeKeyBytes(primaryKeyValue), rowPointer);
+        => InsertPrimaryKey(table, new[] { primaryKeyValue }, rowPointer);
 
-    /// <summary>
-    /// Composite-PK variant. Encodes the multi-column key (single ascending
-    /// flag prefix + per-column bytes) and inserts it into the same B-tree.
-    /// </summary>
+    /// <summary>Composite-key variant of <see cref="InsertPrimaryKey(TableDefinition, object, int)"/>.</summary>
     public void InsertPrimaryKey(TableDefinition table, IReadOnlyList<object?> values, int rowPointer)
-        => InsertPrimaryKeyBytes(table, EncodeCompositeKeyBytes(values), rowPointer);
-
-    private void InsertPrimaryKeyBytes(TableDefinition table, byte[] keyBytes, int rowPointer)
     {
         if (table.PrimaryKeyIndexPage == 0)
             throw new InvalidOperationException(
                 "Table has no primary key index page. " +
                 "Specify a primary key column name when calling Database.CreateTable.");
 
-        var format = _file.Format;
-
-        int rootPage = table.PrimaryKeyIndexPage;
-        byte[] root = _file.ReadPage(rootPage);
-        bool rootIsLeaf = root[0] == JetFormat.PageTypeIndexLeaf;
-
-        if (rootIsLeaf)
-        {
-            // Two-level path: try inserting into the root leaf directly.
-            var split = InsertIntoLeaf(rootPage, keyBytes, rowPointer);
-            if (split is null) return;
-
-            // Leaf split — promote: create a node above pointing at both halves.
-            int newRoot = CreateRootNode(
-                leftPage:    rootPage, leftMaxKey:  split.Value.LeftMaxKey,
-                rightPage:   split.Value.NewSiblingPage, rightMaxKey: split.Value.RightMaxKey);
-            table.PrimaryKeyIndexPage = newRoot;
-            PatchTdefRoot(table, newRoot);
-            return;
-        }
-
-        // Three-level path: root is a node. Descend to the right leaf, insert, and
-        // if it splits, update the node entry's key + insert a new entry.
-        int leafPage = DescendToLeaf(rootPage, keyBytes);
-        var leafSplit = InsertIntoLeaf(leafPage, keyBytes, rowPointer);
-        if (leafSplit is null) return;
-
-        // Update node to reflect the leaf split: child's key shrinks to LeftMaxKey,
-        // and we add a new entry pointing at the new sibling with RightMaxKey.
-        UpdateNodeForLeafSplit(rootPage,
-            oldChildPage: leafPage, oldChildNewKey: leafSplit.Value.LeftMaxKey,
-            newChildPage: leafSplit.Value.NewSiblingPage, newChildKey: leafSplit.Value.RightMaxKey);
+        var target = new Target(table.TdefPageNumber, table.PrimaryKeyIndexPage,
+                                table.PrimaryKeyIndexUmapPage, table.PrimaryKeyIndexUmapRow);
+        Insert(target, PrimaryKeyBytes(table, values), rowPointer);
     }
-
-    // ── Internals ────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Insert a single (keyBytes, rowPtr) into the leaf at <paramref name="leafPage"/>.
-    /// Returns null if the entry fit; otherwise the split info to propagate upward.
+    /// Takes the entry for <paramref name="values"/> at <paramref name="rowPointer"/> out of the table's primary
+    /// key: a row deleted, or moved by an update.
     /// </summary>
-    private LeafSplit? InsertIntoLeaf(int leafPage, byte[] keyBytes, int rowPointer)
+    internal void RemovePrimaryKey(TableDefinition table, IReadOnlyList<object?> values, int rowPointer)
     {
-        var format = _file.Format;
-        byte[] page = _file.ReadPage(leafPage);
-        var entries = ReadEntries(page, format, isLeaf: true);
+        if (table.PrimaryKeyIndexPage == 0) return;
+        var target = new Target(table.TdefPageNumber, table.PrimaryKeyIndexPage,
+                                table.PrimaryKeyIndexUmapPage, table.PrimaryKeyIndexUmapRow);
+        Remove(target, PrimaryKeyBytes(table, values), rowPointer);
+    }
 
-        var newEntry = BuildLeafEntry(keyBytes, rowPointer);
-        InsertSortedLeaf(entries, newEntry);
+    /// <summary>
+    /// The primary key's columns: from the index on disk when the table was read,
+    /// or from its definition (ascending) when this library made it.
+    /// </summary>
+    internal static IReadOnlyList<IndexColumn> PrimaryKeyColumns(TableDefinition table)
+    {
+        var pk = table.Indexes.FirstOrDefault(ix => ix.IsPrimaryKey);
+        if (pk is not null && pk.Columns.Count > 0) return pk.Columns;
+        return table.EffectivePrimaryKeyColumns
+            .Select(name => new IndexColumn(
+                table.Columns.First(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)), 0x01))
+            .ToList();
+    }
 
-        int entriesAreaSize = format.PageSize - format.OffsetIndexEntryMask - format.SizeIndexEntryMask;
-        int totalBytes = entries.Sum(e => e.RawBytes.Length);
+    private static byte[] PrimaryKeyBytes(TableDefinition table, IReadOnlyList<object?> values)
+    {
+        var columns = PrimaryKeyColumns(table);
+        foreach (var value in values)
+            if (value is null)
+                throw new NotSupportedException("A primary key value cannot be null.");
+        return IndexKeys.Encode(columns, values);
+    }
 
-        if (totalBytes <= entriesAreaSize && entries.Count <= 3624)
+    // ── Any index ────────────────────────────────────────────────────────────
+
+    /// <summary>An index to change: its table's TDEF page, its root page (which never moves), and its used-pages usage map.</summary>
+    internal sealed class Target
+    {
+        public Target(int tdefPage, int rootPage, int umapPage, int umapRow)
         {
-            // Fits — rewrite the whole leaf in place.
-            WriteEntries(leafPage, entries, format, isLeaf: true);
-            return null;
+            TdefPage = tdefPage;
+            RootPage = rootPage;
+            UmapPage = umapPage;
+            UmapRow  = umapRow;
         }
 
-        // Doesn't fit — split into two leaves.
-        int mid = entries.Count / 2;
-        var left  = entries.GetRange(0, mid);
-        var right = entries.GetRange(mid, entries.Count - mid);
+        public static Target For(int tdefPage, Index index)
+            => new(tdefPage, index.RootPageNumber, index.UsedPagesUmapPage, index.UsedPagesUmapRow);
 
-        // Allocate the right sibling and stitch into the next-pointer chain.
-        int rightPage = _allocator.AllocatePage();
-        byte[] rightPg = BuildEmptyIndexPage(format, isLeaf: true);
-        int origNext = ByteUtil.GetInt(page, format.OffsetNextIndexPage);
-        ByteUtil.PutInt(rightPg, format.OffsetPrevIndexPage, leafPage);
-        ByteUtil.PutInt(rightPg, format.OffsetNextIndexPage, origNext);
-        _file.WritePage(rightPage, rightPg);
-
-        ByteUtil.PutInt(page, format.OffsetNextIndexPage, rightPage);
-        _file.WritePage(leafPage, page);
-
-        WriteEntries(leafPage,  left,  format, isLeaf: true);
-        WriteEntries(rightPage, right, format, isLeaf: true);
-
-        return new LeafSplit(
-            LeftMaxKey:     left[^1].KeyBytes,
-            RightMaxKey:    right[^1].KeyBytes,
-            NewSiblingPage: rightPage);
+        public int TdefPage { get; }
+        public int RootPage { get; }
+        public int UmapPage { get; }
+        public int UmapRow  { get; }
     }
 
-    private int CreateRootNode(int leftPage, byte[] leftMaxKey, int rightPage, byte[] rightMaxKey)
+    /// <summary>
+    /// Adds the entry (<paramref name="key"/>, <paramref name="rowPointer"/>), splitting
+    /// pages up the tree as they fill.
+    /// </summary>
+    internal void Insert(Target target, byte[] key, int rowPointer)
     {
-        var format = _file.Format;
-        int newRootPage = _allocator.AllocatePage();
-        byte[] node = BuildEmptyIndexPage(format, isLeaf: false);
+        var entry = new Entry(key, rowPointer, 0);
+        var path  = new List<(IndexPage Node, int Slot)>();   // Slot -1: the node's tail
 
-        var entries = new List<RawEntry>
+        var page = ReadFor(target, target.RootPage);
+        while (!page.IsLeaf)
         {
-            BuildNodeEntry(leftMaxKey,  leftPage),
-            BuildNodeEntry(rightMaxKey, rightPage),
-        };
-        _file.WritePage(newRootPage, node);
-        WriteEntries(newRootPage, entries, format, isLeaf: false);
-        return newRootPage;
+            UseTail(page, target);
+            int slot = FirstAtLeast(page.Entries, entry);
+            path.Add((page, slot));
+            page = ReadFor(target, slot >= 0 ? page.Entries[slot].SubPage : page.Tail);
+        }
+        InsertSorted(page.Entries, entry);
+        page.Level = 0;
+        WriteUp(path, path.Count, page, target);
     }
 
-    private void UpdateNodeForLeafSplit(
-        int nodePage, int oldChildPage, byte[] oldChildNewKey,
-        int newChildPage, byte[] newChildKey)
+    /// <summary>
+    /// Writes <paramref name="child"/>, the page at <paramref name="depth"/> on <paramref name="path"/> (whose
+    /// parent is <c>path[depth - 1]</c>): while a page does not fit, it splits and its parent gains the entry, up to
+    /// the root, which splits in place.
+    /// </summary>
+    private void WriteUp(List<(IndexPage Node, int Slot)> path, int depth, IndexPage child, Target target)
     {
-        var format = _file.Format;
-        byte[] page = _file.ReadPage(nodePage);
-        var entries = ReadEntries(page, format, isLeaf: false);
-
-        // Find the entry whose subPage == oldChildPage and rebuild it with the new key.
-        for (int i = 0; i < entries.Count; i++)
+        for (; ; depth--)
         {
-            if (entries[i].SubPage == oldChildPage)
+            if (Fits(child))
             {
-                entries[i] = BuildNodeEntry(oldChildNewKey, oldChildPage);
+                Write(child);
+                return;
+            }
+
+            if (depth == 0)
+            {
+                SplitRoot(child, target);
+                return;
+            }
+
+            var (pieces, lasts) = Split(child, target, keepNumber: true);
+            var added = lasts.Select((last, i) => new Entry(last.Key, last.RowPtr, pieces[i].Number)).ToList();
+
+            var (parent, parentSlot) = path[depth - 1];
+            if (parentSlot >= 0)
+            {
+                // The split page's entry now names its last piece, which holds its last row;
+                // each piece before it gets an entry of its own.
+                var old = parent.Entries[parentSlot];
+                parent.Entries[parentSlot] = new Entry(old.Key, old.RowPtr, pieces[^1].Number);
+                parent.Entries.InsertRange(parentSlot, added);
+            }
+            else
+            {
+                // The split page was the tail: the pieces before its last get entries; its last is the tail.
+                parent.Entries.AddRange(added);
+                parent.Tail = pieces[^1].Number;
+            }
+            parent.Level = child.Level + 1;
+            child = parent;
+        }
+    }
+
+    /// <summary>
+    /// Takes the entry (<paramref name="key"/>, <paramref name="rowPointer"/>) out of the tree, as Access and
+    /// Jackcess do: a page left empty leaves the tree and its level's chain (a tail leaving its node, the node's
+    /// last entry's child becomes the tail), an entry copying the last entry under a page follows it when that
+    /// changes, and a root left with one child gives way to it. An entry the tree does not hold is no change.
+    /// </summary>
+    internal void Remove(Target target, byte[] key, int rowPointer)
+    {
+        var entry = new Entry(key, rowPointer, 0);
+        var path  = new List<(IndexPage Node, int Slot)>();   // Slot -1: the node's tail
+
+        var page = ReadFor(target, target.RootPage);
+        while (!page.IsLeaf)
+        {
+            UseTail(page, target);
+            int slot = FirstAtLeast(page.Entries, entry);
+            path.Add((page, slot));
+            page = ReadFor(target, slot >= 0 ? page.Entries[slot].SubPage : page.Tail);
+        }
+        int at = page.Entries.FindIndex(e => Compare(e, entry) == 0);
+        if (at < 0) return;
+        page.Entries.RemoveAt(at);
+        page.Level = 0;
+
+        // The last entry under the page, when the removal changed it.
+        Entry? newLast = at == page.Entries.Count && page.Entries.Count > 0 ? page.Entries[^1] : null;
+
+        // An empty page leaves the tree; its parent loses the entry for it, or its tail.
+        var child = page;
+        int depth = path.Count;
+        while (depth > 0 && child.Entries.Count == 0 && (child.IsLeaf || child.Tail <= 0))
+        {
+            Drop(child, target);
+            var (parent, slot) = path[depth - 1];
+            if (slot >= 0)
+            {
+                parent.Entries.RemoveAt(slot);
+                newLast = null;   // the parent's tail still holds what is last under it
+            }
+            else if (parent.Entries.Count > 0)
+            {
+                var last = parent.Entries[^1];
+                parent.Entries.RemoveAt(parent.Entries.Count - 1);
+                parent.Tail = last.SubPage;
+                newLast = last;
+            }
+            else
+            {
+                parent.Tail = 0;
+                newLast = null;
+            }
+            child = parent;
+            depth--;
+        }
+
+        if (depth == 0 && !child.IsLeaf && child.Entries.Count == 0)
+        {
+            CollapseRoot(child, target);
+            return;
+        }
+        WriteUp(path, depth, child, target);
+
+        // The first ancestor naming the page in an entry copies its new last entry, which can
+        // make that ancestor's page too full: it splits as an insert's would.
+        if (newLast is { } changed)
+        {
+            for (int d = depth - 1; d >= 0; d--)
+            {
+                var (parent, slot) = path[d];
+                if (slot < 0) continue;
+                parent.Entries[slot] = new Entry(changed.Key, changed.RowPtr, parent.Entries[slot].SubPage);
+                WriteUp(path, d, parent, target);
                 break;
             }
         }
-
-        // Insert the new sibling's entry in sorted order.
-        var newSibEntry = BuildNodeEntry(newChildKey, newChildPage);
-        InsertSortedLeaf(entries, newSibEntry);
-
-        int entriesAreaSize = format.PageSize - format.OffsetIndexEntryMask - format.SizeIndexEntryMask;
-        int totalBytes = entries.Sum(e => e.RawBytes.Length);
-        if (totalBytes > entriesAreaSize || entries.Count > 3624)
-            throw new NotSupportedException(
-                $"Root node is full ({entries.Count} children). " +
-                "Tree depths greater than 2 (root node + leaves) are not yet supported.");
-
-        WriteEntries(nodePage, entries, format, isLeaf: false);
     }
 
     /// <summary>
-    /// Descends from <paramref name="startPage"/> (root) to the leaf whose key
-    /// range covers <paramref name="searchKey"/>. Convention: first entry with
-    /// <c>entry.key &gt;= searchKey</c> wins; if none, descend to the last entry.
+    /// A root with one child takes that child's entries back, on its own page, for as
+    /// long as that leaves it with one child; a root with none is an empty leaf again.
     /// </summary>
-    private int DescendToLeaf(int startPage, byte[] searchKey)
+    private void CollapseRoot(IndexPage root, Target target)
     {
-        var format = _file.Format;
-        int cur = startPage;
+        while (!root.IsLeaf && root.Entries.Count == 0)
+        {
+            if (root.Tail <= 0)
+            {
+                Write(new IndexPage(root.Number, isLeaf: true, root.Raw) { Tdef = target.TdefPage });
+                return;
+            }
+            var only = Read(root.Tail);
+            var taken = new IndexPage(root.Number, only.IsLeaf, root.Raw)
+            {
+                Tdef  = target.TdefPage,
+                Level = only.Level,
+                Tail  = only.Tail,
+            };
+            taken.Entries.AddRange(only.Entries);
+            if (!Fits(taken)) break;   // a child Access packed tighter than these pages are written
+            if (target.UmapPage > 0)
+                UsageMap.RemovePage(_file, target.UmapPage, target.UmapRow, only.Number);
+            root = taken;
+        }
+        Write(root);
+    }
+
+    // A page leaving the tree: out of its level's chain and its index's usage map.
+    private void Drop(IndexPage page, Target target)
+    {
+        if (page.Prev > 0) PatchLink(page.Prev, _format.OffsetNextIndexPage, page.Next);
+        if (page.Next > 0) PatchLink(page.Next, _format.OffsetPrevIndexPage, page.Prev);
+        if (target.UmapPage > 0)
+            UsageMap.RemovePage(_file, target.UmapPage, target.UmapRow, page.Number);
+    }
+
+    /// <summary>
+    /// The row pointers of every entry whose key is <paramref name="key"/>, in order,
+    /// in the tree rooted at <paramref name="rootPage"/>.
+    /// </summary>
+    internal IEnumerable<int> RowPointersForKey(int rootPage, byte[] key)
+    {
+        var first = new Entry(key, 0, 0);
+        var page  = Read(rootPage);
+        while (!page.IsLeaf)
+        {
+            UseTail(page, target: null);
+            int slot  = FirstAtLeast(page.Entries, first);
+            int child = slot >= 0 ? page.Entries[slot].SubPage : page.Tail;
+            if (child <= 0) yield break;
+            page = Read(child);
+        }
+
         while (true)
         {
-            byte[] page = _file.ReadPage(cur);
-            if (page[0] == JetFormat.PageTypeIndexLeaf) return cur;
-            if (page[0] != JetFormat.PageTypeIndexNode) return cur;
-
-            var entries = ReadEntries(page, format, isLeaf: false);
-            int target = -1;
-            foreach (var e in entries)
+            foreach (var e in page.Entries)
             {
-                if (CompareBytes(e.KeyBytes, searchKey) >= 0)
-                {
-                    target = e.SubPage;
-                    break;
-                }
+                int cmp = CompareBytes(e.Key, key);
+                if (cmp == 0) yield return e.RowPtr;
+                else if (cmp > 0) yield break;
             }
-            if (target < 0)
-                target = entries[^1].SubPage;
-            cur = target;
+            if (page.Next <= 0) yield break;
+            page = Read(page.Next);
+        }
+    }
+
+    // ── Splitting ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Splits <paramref name="page"/>, which does not fit, into pieces that each do:
+    /// it halves, and a half that still does not fit halves again, as a page holding
+    /// keys that share a long prefix and one that shares none can need. With
+    /// <paramref name="keepNumber"/> the first piece keeps the page's number and the
+    /// pieces take its place in its level's chain; otherwise they are all new pages,
+    /// chained to one another. Writes them and returns them in order with, for each
+    /// but the last, the last entry under it, which its parent holds a copy of (the
+    /// last piece's is the page's own).
+    /// </summary>
+    private (List<IndexPage> Pieces, List<Entry> Lasts) Split(IndexPage page, Target target, bool keepNumber)
+    {
+        var contents = new List<(List<Entry> Entries, int Tail)>();
+        var lasts    = new List<Entry>();
+        Halve(page.IsLeaf, page.Entries, page.Tail, contents, lasts);
+
+        var pieces = new List<IndexPage>();
+        for (int i = 0; i < contents.Count; i++)
+        {
+            var piece = i == 0 && keepNumber
+                ? new IndexPage(page.Number, page.IsLeaf, page.Raw)
+                : new IndexPage(_allocator.AllocatePage(), page.IsLeaf, raw: null);
+            piece.Tdef  = target.TdefPage;
+            piece.Level = page.Level;
+            piece.Tail  = contents[i].Tail;
+            piece.Entries.AddRange(contents[i].Entries);
+            pieces.Add(piece);
+        }
+        for (int i = 0; i < pieces.Count; i++)
+        {
+            pieces[i].Prev = i > 0 ? pieces[i - 1].Number : keepNumber ? page.Prev : 0;
+            pieces[i].Next = i < pieces.Count - 1 ? pieces[i + 1].Number : keepNumber ? page.Next : 0;
+        }
+        if (keepNumber && page.Next > 0)
+            PatchLink(page.Next, _format.OffsetPrevIndexPage, pieces[^1].Number);
+
+        foreach (var piece in pieces)
+            Write(piece);
+        foreach (var piece in pieces.Skip(keepNumber ? 1 : 0))
+            Own(target, piece.Number);
+        return (pieces, lasts);
+    }
+
+    // Halves a page's content until each part fits, adding the parts and, between them, the
+    // last entry under each part but the last. A node's middle entry goes up between its halves:
+    // its child becomes the left half's tail.
+    private void Halve(bool isLeaf, List<Entry> entries, int tail, List<(List<Entry>, int)> parts, List<Entry> lasts)
+    {
+        if (Fits(isLeaf, entries))
+        {
+            parts.Add((entries, tail));
+            return;
+        }
+        int mid = entries.Count / 2;
+        if (isLeaf)
+        {
+            if (entries.Count < 2)
+                throw new InvalidDataException($"An index entry of {entries[0].Key.Length + LeafTrailerLen} bytes does not fit a page.");
+            Halve(true, entries.GetRange(0, mid), 0, parts, lasts);
+            lasts.Add(entries[mid - 1]);
+            Halve(true, entries.GetRange(mid, entries.Count - mid), 0, parts, lasts);
+        }
+        else
+        {
+            if (entries.Count < 3)
+                throw new InvalidDataException($"An index node of {entries.Count} entries does not fit a page.");
+            var middle = entries[mid];
+            Halve(false, entries.GetRange(0, mid), middle.SubPage, parts, lasts);
+            lasts.Add(middle);
+            Halve(false, entries.GetRange(mid + 1, entries.Count - mid - 1), tail, parts, lasts);
         }
     }
 
     /// <summary>
-    /// Reads all entries from a leaf or node page, decoded into <see cref="RawEntry"/>
-    /// records. Entries are returned in their on-disk order (which our writer keeps
-    /// sorted ascending). Compressed-prefix is not supported on the write path —
-    /// we always emit full-length entries with compressedByteCount = 0.
+    /// Splits the root without moving it, as Jackcess does: its content goes to new
+    /// pages beneath it, as many as fit it, chained as their level, and it becomes the
+    /// node above them - splitting again, the same way, if that node does not fit.
     /// </summary>
-    private static List<RawEntry> ReadEntries(byte[] page, JetFormat format, bool isLeaf)
+    private void SplitRoot(IndexPage root, Target target)
     {
-        var result = new List<RawEntry>();
-        int trailerLen   = isLeaf ? LeafTrailerLen : NodeTrailerLen;
-        int entryMaskPos = format.OffsetIndexEntryMask;
-        int maskLen      = format.SizeIndexEntryMask;
-        int entriesPos   = entryMaskPos + maskLen;
-
-        int lastStart = 0;
-        for (int i = 0; i < maskLen; i++)
+        var (pieces, lasts) = Split(root, target, keepNumber: false);
+        var node = new IndexPage(root.Number, isLeaf: false, root.Raw)
         {
-            byte b = page[entryMaskPos + i];
+            Tdef  = target.TdefPage,
+            Level = root.Level + 1,
+            Tail  = pieces[^1].Number,
+        };
+        node.Entries.AddRange(lasts.Select((last, i) => new Entry(last.Key, last.RowPtr, pieces[i].Number)));
+        if (Fits(node)) Write(node);
+        else SplitRoot(node, target);
+    }
+
+    /// <summary>
+    /// A node written by an earlier version of this library has an entry for every
+    /// child, each with row pointer 0, and no tail: its last child becomes the tail.
+    /// When the tree is being changed (a <paramref name="target"/>), each entry also
+    /// takes the row of the last entry under its child, so entries compare as Access's
+    /// do; its children are written back naming the TDEF, with 0 for no page; and the
+    /// node is written back with its level. A search for a key's first entry (row 0)
+    /// goes to the same child either way, so a search reads no more.
+    /// </summary>
+    private void UseTail(IndexPage node, Target? target)
+    {
+        if (node.Tail > 0 || node.Entries.Count == 0) return;
+        node.Tail = node.Entries[^1].SubPage;
+        node.Entries.RemoveAt(node.Entries.Count - 1);
+        if (target is null) return;
+        for (int i = 0; i < node.Entries.Count; i++)
+        {
+            if (LastEntryUnder(node.Entries[i].SubPage) is { } last)
+                node.Entries[i] = new Entry(last.Key, last.RowPtr, node.Entries[i].SubPage);
+        }
+        foreach (int child in node.Entries.Select(e => e.SubPage).Append(node.Tail))
+            Write(ReadFor(target, child));
+        node.Level = HeightOf(node);
+        Write(node);
+    }
+
+    // The last entry in the subtree under a page: down its tails (or last entries) to a leaf.
+    private Entry? LastEntryUnder(int pageNumber)
+    {
+        var page = Read(pageNumber);
+        while (!page.IsLeaf)
+        {
+            int next = page.Tail > 0 ? page.Tail : page.Entries.Count > 0 ? page.Entries[^1].SubPage : 0;
+            if (next <= 0) return null;
+            page = Read(next);
+        }
+        return page.Entries.Count > 0 ? page.Entries[^1] : null;
+    }
+
+    // A page's height above the leaves, found by walking down its last children.
+    private int HeightOf(IndexPage page)
+    {
+        int height = 0;
+        while (!page.IsLeaf)
+        {
+            int next = page.Tail > 0 ? page.Tail : page.Entries.Count > 0 ? page.Entries[^1].SubPage : 0;
+            if (next <= 0) break;
+            page = Read(next);
+            height++;
+        }
+        return height;
+    }
+
+    private void Own(Target target, int pageNumber)
+    {
+        if (target.UmapPage > 0)
+            UsageMap.AddPage(_file, _allocator, target.UmapPage, target.UmapRow, pageNumber);
+    }
+
+    private void PatchLink(int pageNumber, int offset, int value)
+    {
+        byte[] raw = _file.ReadPage(pageNumber);
+        ByteUtil.PutInt(raw, offset, value);
+        _file.WritePage(pageNumber, raw);
+    }
+
+    // ── Pages ────────────────────────────────────────────────────────────────
+
+    private sealed class IndexPage
+    {
+        public IndexPage(int number, bool isLeaf, byte[]? raw)
+        {
+            Number = number;
+            IsLeaf = isLeaf;
+            Raw    = raw;
+        }
+
+        public int         Number  { get; }
+        public bool        IsLeaf  { get; }
+        public byte[]?     Raw     { get; }   // as read; null for a new page
+        public int         Tdef    { get; set; }
+        public int         Level   { get; set; }
+        public int         Prev    { get; set; }
+        public int         Next    { get; set; }
+        public int         Tail    { get; set; }
+        public List<Entry> Entries { get; } = new();
+    }
+
+    private readonly record struct Entry(byte[] Key, int RowPtr, int SubPage);
+
+    private int EntriesStart => _format.OffsetIndexEntryMask + _format.SizeIndexEntryMask;
+
+    // Jet4 keeps a page's height above the leaves in the byte after the shared-prefix length.
+    private bool HasLevelByte => _format.OffsetIndexEntryMask - _format.OffsetIndexCompressedByteCount > 2;
+
+    private IndexPage Read(int number)
+    {
+        byte[] raw = _file.ReadPage(number);
+        if (raw[0] != JetFormat.PageTypeIndexLeaf && raw[0] != JetFormat.PageTypeIndexNode)
+            throw new InvalidDataException($"Page {number} is not an index page (type 0x{raw[0]:X2}).");
+
+        bool isLeaf = raw[0] == JetFormat.PageTypeIndexLeaf;
+        var page = new IndexPage(number, isLeaf, raw)
+        {
+            Tdef  = ByteUtil.GetInt(raw, OffsetTdefPage),
+            Level = HasLevelByte ? raw[_format.OffsetIndexCompressedByteCount + 2] : 0,
+            Prev  = Link(ByteUtil.GetInt(raw, _format.OffsetPrevIndexPage)),
+            Next  = Link(ByteUtil.GetInt(raw, _format.OffsetNextIndexPage)),
+            Tail  = isLeaf ? 0 : Link(ByteUtil.GetInt(raw, _format.OffsetChildTailIndexPage)),
+        };
+
+        // Entries end where the mask has a bit set; the first is stored in full and
+        // the rest without the prefix they share with it.
+        int prefixLen  = ByteUtil.GetUShort(raw, _format.OffsetIndexCompressedByteCount);
+        int trailerLen = isLeaf ? LeafTrailerLen : NodeTrailerLen;
+        byte[]? prefix = null;
+        int start = 0;
+        for (int i = 0; i < _format.SizeIndexEntryMask; i++)
+        {
+            byte b = raw[_format.OffsetIndexEntryMask + i];
             if (b == 0) continue;
-            for (int j = 0; j < 8; j++)
+            for (int bit = 0; bit < 8; bit++)
             {
-                if ((b & (1 << j)) == 0) continue;
-                int endOffset = i * 8 + j;
-                int entryLen  = endOffset - lastStart;
-                int entryAbs  = entriesPos + lastStart;
-                if (entryLen >= trailerLen)
+                if ((b & (1 << bit)) == 0) continue;
+                int end    = i * 8 + bit;
+                int stored = end - start;
+                byte[] full;
+                if (page.Entries.Count == 0 || prefix is null)
                 {
-                    int keyLen = entryLen - trailerLen;
-                    var key = new byte[keyLen];
-                    Array.Copy(page, entryAbs, key, 0, keyLen);
-
-                    int pgBE = (page[entryAbs + keyLen]     << 16)
-                             | (page[entryAbs + keyLen + 1] <<  8)
-                             |  page[entryAbs + keyLen + 2];
-                    int row  = page[entryAbs + keyLen + 3];
-                    int subPage = 0;
-                    if (!isLeaf)
-                    {
-                        subPage = (page[entryAbs + keyLen + 4] << 24)
-                                | (page[entryAbs + keyLen + 5] << 16)
-                                | (page[entryAbs + keyLen + 6] <<  8)
-                                |  page[entryAbs + keyLen + 7];
-                    }
-                    var raw = new byte[entryLen];
-                    Array.Copy(page, entryAbs, raw, 0, entryLen);
-                    result.Add(new RawEntry(key, raw, RowPointer.Pack(pgBE, row), subPage));
+                    full = new byte[stored];
+                    Array.Copy(raw, EntriesStart + start, full, 0, stored);
+                    if (page.Entries.Count == 0 && prefixLen > 0)
+                        prefix = full.Take(prefixLen).ToArray();
                 }
-                lastStart = endOffset;
+                else
+                {
+                    full = new byte[prefix.Length + stored];
+                    Array.Copy(prefix, full, prefix.Length);
+                    Array.Copy(raw, EntriesStart + start, full, prefix.Length, stored);
+                }
+                start = end;
+
+                if (full.Length < trailerLen)
+                    throw new InvalidDataException($"Index page {number} has an entry of {full.Length} bytes.");
+                int keyLen = full.Length - trailerLen;
+                int rowPage = (full[keyLen] << 16) | (full[keyLen + 1] << 8) | full[keyLen + 2];
+                int rowPtr  = RowPointer.Pack(rowPage, full[keyLen + 3]);
+                int subPage = isLeaf ? 0
+                    : (full[keyLen + 4] << 24) | (full[keyLen + 5] << 16) | (full[keyLen + 6] << 8) | full[keyLen + 7];
+                page.Entries.Add(new Entry(full.Take(keyLen).ToArray(), rowPtr, subPage));
             }
         }
-        return result;
+        return page;
     }
 
-    private void WriteEntries(int pageNumber, List<RawEntry> entries, JetFormat format, bool isLeaf)
+    private static int Link(int value) => value == OldNoPage ? 0 : value;
+
+    // A page of the index being changed: it names the index's table, as Access's pages do.
+    private IndexPage ReadFor(Target target, int number)
     {
-        byte[] page = _file.ReadPage(pageNumber);
-
-        // Clear entry mask + entries area.
-        int entryMaskPos = format.OffsetIndexEntryMask;
-        int maskLen      = format.SizeIndexEntryMask;
-        int entriesPos   = entryMaskPos + maskLen;
-        for (int i = 0; i < maskLen; i++) page[entryMaskPos + i] = 0;
-        int areaSize = format.PageSize - entriesPos;
-        for (int i = 0; i < areaSize; i++) page[entriesPos + i] = 0;
-
-        int cursor = 0;
-        foreach (var e in entries)
-        {
-            Array.Copy(e.RawBytes, 0, page, entriesPos + cursor, e.RawBytes.Length);
-            cursor += e.RawBytes.Length;
-            int endPos = cursor;
-            page[entryMaskPos + endPos / 8] |= (byte)(1 << (endPos % 8));
-        }
-        ByteUtil.PutShort(page, 2, (short)(areaSize - cursor));
-        // Re-establish page-type bytes (BuildEmptyIndexPage sets them, but we read
-        // existing pages on the write path).
-        page[0] = isLeaf ? JetFormat.PageTypeIndexLeaf : JetFormat.PageTypeIndexNode;
-        page[1] = 0x01;
-        _file.WritePage(pageNumber, page);
+        var page = Read(number);
+        page.Tdef = target.TdefPage;
+        return page;
     }
 
     /// <summary>
-    /// Inserts <paramref name="entry"/> into <paramref name="entries"/> at the
-    /// position that keeps the list sorted ascending by key bytes.
+    /// The bytes every key of a page begins with: those its first and last keys
+    /// share, the keys being in order. Stored once, in the first entry.
     /// </summary>
-    private static void InsertSortedLeaf(List<RawEntry> entries, RawEntry entry)
+    private static int SharedPrefix(List<Entry> entries)
+    {
+        if (entries.Count < 2) return 0;
+        byte[] first = entries[0].Key, last = entries[^1].Key;
+        int n = Math.Min(first.Length, last.Length), shared = 0;
+        while (shared < n && first[shared] == last[shared]) shared++;
+        return shared;
+    }
+
+    private static int Size(bool isLeaf, List<Entry> entries) => entries.Sum(e => e.Key.Length)
+        + entries.Count * (isLeaf ? LeafTrailerLen : NodeTrailerLen)
+        - Math.Max(0, entries.Count - 1) * SharedPrefix(entries);
+
+    private bool Fits(bool isLeaf, List<Entry> entries) => Size(isLeaf, entries) <= _format.PageSize - EntriesStart;
+
+    private bool Fits(IndexPage page) => Fits(page.IsLeaf, page.Entries);
+
+    private void Write(IndexPage p)
+    {
+        byte[] page = p.Raw ?? new byte[_format.PageSize];
+        page[0] = p.IsLeaf ? JetFormat.PageTypeIndexLeaf : JetFormat.PageTypeIndexNode;
+        page[1] = 0x01;
+        ByteUtil.PutInt  (page, OffsetTdefPage,                    p.Tdef);
+        ByteUtil.PutInt  (page, _format.OffsetPrevIndexPage,       p.Prev);
+        ByteUtil.PutInt  (page, _format.OffsetNextIndexPage,       p.Next);
+        ByteUtil.PutInt  (page, _format.OffsetChildTailIndexPage,  p.IsLeaf ? 0 : p.Tail);
+        int shared = SharedPrefix(p.Entries);
+        ByteUtil.PutShort(page, _format.OffsetIndexCompressedByteCount, (short)shared);
+        if (HasLevelByte) page[_format.OffsetIndexCompressedByteCount + 2] = (byte)p.Level;
+        if (!Fits(p))
+            throw new InvalidOperationException(
+                $"Index page {p.Number} holds {Size(p.IsLeaf, p.Entries)} bytes of entries; it has room for {_format.PageSize - EntriesStart}.");
+
+        Array.Clear(page, _format.OffsetIndexEntryMask, _format.PageSize - _format.OffsetIndexEntryMask);
+        int end = 0;
+        for (int i = 0; i < p.Entries.Count; i++)
+        {
+            var e = p.Entries[i];
+            int skip = i == 0 ? 0 : shared;   // the first entry holds the prefix the rest leave out
+            int at = EntriesStart + end;
+            Array.Copy(e.Key, skip, page, at, e.Key.Length - skip);
+            at += e.Key.Length - skip;
+            int rowPage = RowPointer.Page(e.RowPtr);
+            page[at++] = (byte)(rowPage >> 16);
+            page[at++] = (byte)(rowPage >> 8);
+            page[at++] = (byte) rowPage;
+            page[at++] = (byte)RowPointer.Row(e.RowPtr);
+            if (!p.IsLeaf)
+            {
+                page[at++] = (byte)(e.SubPage >> 24);
+                page[at++] = (byte)(e.SubPage >> 16);
+                page[at++] = (byte)(e.SubPage >> 8);
+                page[at++] = (byte) e.SubPage;
+            }
+            end = at - EntriesStart;
+            page[_format.OffsetIndexEntryMask + end / 8] |= (byte)(1 << (end % 8));
+        }
+        ByteUtil.PutShort(page, 2, (short)(_format.PageSize - EntriesStart - end));
+        _file.WritePage(p.Number, page);
+    }
+
+    // ── Ordering ─────────────────────────────────────────────────────────────
+
+    // By key, then by row pointer (its page, then its row).
+    private static int Compare(Entry a, Entry b)
+    {
+        int cmp = CompareBytes(a.Key, b.Key);
+        return cmp != 0 ? cmp : ((uint)a.RowPtr).CompareTo((uint)b.RowPtr);
+    }
+
+    // The first entry at or after x; -1 when x is after them all.
+    private static int FirstAtLeast(List<Entry> entries, Entry x)
     {
         int lo = 0, hi = entries.Count;
         while (lo < hi)
         {
             int mid = (lo + hi) >>> 1;
-            if (CompareBytes(entries[mid].KeyBytes, entry.KeyBytes) <= 0) lo = mid + 1;
+            if (Compare(entries[mid], x) < 0) lo = mid + 1;
             else hi = mid;
         }
-        entries.Insert(lo, entry);
+        return lo < entries.Count ? lo : -1;
     }
 
-    // ── Entry builders ────────────────────────────────────────────────────────
-
-    private static RawEntry BuildLeafEntry(byte[] keyBytes, int rowPointer)
+    private static void InsertSorted(List<Entry> entries, Entry x)
     {
-        int pageNum = RowPointer.Page(rowPointer);
-        int rowNum  = RowPointer.Row(rowPointer);
-        var raw = new byte[keyBytes.Length + LeafTrailerLen];
-        Array.Copy(keyBytes, raw, keyBytes.Length);
-        raw[keyBytes.Length    ] = (byte)((pageNum >> 16) & 0xFF);
-        raw[keyBytes.Length + 1] = (byte)((pageNum >>  8) & 0xFF);
-        raw[keyBytes.Length + 2] = (byte) (pageNum        & 0xFF);
-        raw[keyBytes.Length + 3] = (byte)  rowNum;
-        return new RawEntry(keyBytes, raw, rowPointer, 0);
+        int at = FirstAtLeast(entries, x);
+        entries.Insert(at < 0 ? entries.Count : at, x);
     }
-
-    private static RawEntry BuildNodeEntry(byte[] keyBytes, int subPage)
-    {
-        // For nodes, rowId (first 4 trailer bytes) is unused for descent — we
-        // leave it as 0 since IndexReader doesn't compare against it.
-        var raw = new byte[keyBytes.Length + NodeTrailerLen];
-        Array.Copy(keyBytes, raw, keyBytes.Length);
-        // bytes [keyLen..keyLen+3] left as 0 (rowId)
-        raw[keyBytes.Length + 4] = (byte)((subPage >> 24) & 0xFF);
-        raw[keyBytes.Length + 5] = (byte)((subPage >> 16) & 0xFF);
-        raw[keyBytes.Length + 6] = (byte)((subPage >>  8) & 0xFF);
-        raw[keyBytes.Length + 7] = (byte) (subPage        & 0xFF);
-        return new RawEntry(keyBytes, raw, 0, subPage);
-    }
-
-    // ── TDEF root-page patch ──────────────────────────────────────────────────
-
-    /// <summary>
-    /// After a root-page change (initial leaf-to-node promotion), update the
-    /// TDEF's index column block so the new root persists. Layout per Jackcess:
-    /// header + numIndexes×SizeIndexDefinition + numCols×SizeColumnHeader
-    /// + column-names → first index column block at that offset; the root-page
-    /// field is at <c>blockStart + SkipBeforeIndex + 30 + 4</c>.
-    /// </summary>
-    private void PatchTdefRoot(TableDefinition table, int newRoot)
-    {
-        var format = _file.Format;
-        byte[] page = _file.ReadPage(table.TdefPageNumber);
-
-        int numIndexes = ByteUtil.GetInt(page, format.TdefOffsetNumIndexes);
-        if (numIndexes < 1) return;
-        int numCols    = ByteUtil.GetShort(page, format.TdefOffsetNumCols);
-        int colHdrSize = format.SizeColumnHeader;
-
-        int colDefStart  = format.SizeTdefHeader + numIndexes * format.SizeIndexDefinition;
-        int colNamesPos  = colDefStart + numCols * colHdrSize;
-
-        // Walk past column names to land on the first index column block.
-        int pos = colNamesPos;
-        for (int i = 0; i < numCols && pos + format.SizeNameLength <= page.Length; i++)
-        {
-            int nameLen = format.SizeNameLength == 2
-                ? ByteUtil.GetShort(page, pos)
-                : page[pos];
-            pos += format.SizeNameLength + nameLen;
-        }
-
-        // First index column block — rootPage field sits at offset +SkipBeforeIndex+34
-        // (4 magic + 10×3 col entries + 4 umap ref).
-        int rootFieldOffset = pos + format.SkipBeforeIndex + 30 + 4;
-        ByteUtil.PutInt(page, rootFieldOffset, newRoot);
-        _file.WritePage(table.TdefPageNumber, page);
-    }
-
-    // ── Helpers shared with IndexReader ──────────────────────────────────────
 
     private static int CompareBytes(byte[] a, byte[] b)
     {
@@ -489,109 +750,4 @@ public sealed class IndexWriter
         }
         return a.Length - b.Length;
     }
-
-    // ── Key encoding ──────────────────────────────────────────────────────────
-
-    private static byte[] EncodeKeyBytes(object value)
-    {
-        // Single column: ascending flag + per-type value bytes.
-        byte[] valueBytes = EncodeColumnValueBytes(value);
-        var buf = new byte[1 + valueBytes.Length];
-        buf[0] = AscStartFlag;
-        Buffer.BlockCopy(valueBytes, 0, buf, 1, valueBytes.Length);
-        return buf;
-    }
-
-    /// <summary>
-    /// Composite-PK encoder. Emits a single <see cref="AscStartFlag"/> prefix
-    /// followed by each column's value bytes concatenated in declared order.
-    /// Null values are not yet supported — a composite PK with a null component
-    /// would need a per-column null-marker byte (0x00 vs 0x7F prefix) which is
-    /// out of scope for this slice.
-    /// </summary>
-    internal static byte[] EncodeCompositeKeyBytes(IReadOnlyList<object?> values)
-    {
-        if (values is null || values.Count == 0)
-            throw new ArgumentException("Composite key needs at least one value.", nameof(values));
-
-        var parts = new byte[values.Count][];
-        int total = 1;   // leading flag
-        for (int i = 0; i < values.Count; i++)
-        {
-            if (values[i] is null)
-                throw new NotSupportedException(
-                    $"Null values in composite primary keys are not yet supported (component #{i}).");
-            parts[i] = EncodeColumnValueBytes(values[i]!);
-            total += parts[i].Length;
-        }
-        var buf = new byte[total];
-        buf[0] = AscStartFlag;
-        int pos = 1;
-        for (int i = 0; i < parts.Length; i++)
-        {
-            Buffer.BlockCopy(parts[i], 0, buf, pos, parts[i].Length);
-            pos += parts[i].Length;
-        }
-        return buf;
-    }
-
-    /// <summary>
-    /// Per-type value-bytes encoder (without the leading ascending flag).
-    /// Used by both <see cref="EncodeKeyBytes"/> and <see cref="EncodeCompositeKeyBytes"/>.
-    /// </summary>
-    private static byte[] EncodeColumnValueBytes(object value) =>
-        value switch
-        {
-            byte   v => new[] { v },
-            short  v => EncodeAscInt16Bytes(v),
-            int    v => EncodeAscInt32Bytes(v),
-            long   v => EncodeAscInt64Bytes(v),
-            string s => GeneralLegacyIndexCodes.EncodeText(s, isAscending: true),
-            Guid   g => g.ToByteArray(),
-            _ => throw new NotSupportedException(
-                    $"Primary key encoding for type '{value.GetType().Name}' is not yet supported.")
-        };
-
-    private static byte[] EncodeAscInt16Bytes(short value)
-    {
-        ushort v = (ushort)((ushort)value ^ 0x8000u);
-        return new[] { (byte)(v >> 8), (byte)v };
-    }
-
-    private static byte[] EncodeAscInt32Bytes(int value)
-    {
-        uint v = (uint)value ^ 0x80000000u;
-        return new[] { (byte)(v >> 24), (byte)(v >> 16), (byte)(v >> 8), (byte)v };
-    }
-
-    private static byte[] EncodeAscInt64Bytes(long value)
-    {
-        ulong v = (ulong)value ^ 0x8000000000000000ul;
-        return new[]
-        {
-            (byte)(v >> 56), (byte)(v >> 48), (byte)(v >> 40), (byte)(v >> 32),
-            (byte)(v >> 24), (byte)(v >> 16), (byte)(v >>  8), (byte)v
-        };
-    }
-
-    // ── Page builders ────────────────────────────────────────────────────────
-
-    private static byte[] BuildEmptyIndexPage(JetFormat format, bool isLeaf)
-    {
-        var page = new byte[format.PageSize];
-        page[0] = isLeaf ? JetFormat.PageTypeIndexLeaf : JetFormat.PageTypeIndexNode;
-        page[1] = 0x01;
-        int entriesAreaSize = format.PageSize - format.OffsetIndexEntryMask - format.SizeIndexEntryMask;
-        ByteUtil.PutShort(page, 2, (short)entriesAreaSize);
-        ByteUtil.PutInt(page, format.OffsetPrevIndexPage,      NoPage);
-        ByteUtil.PutInt(page, format.OffsetNextIndexPage,      NoPage);
-        ByteUtil.PutInt(page, format.OffsetChildTailIndexPage, NoPage);
-        return page;
-    }
-
-    // ── Records ───────────────────────────────────────────────────────────────
-
-    private record struct RawEntry(byte[] KeyBytes, byte[] RawBytes, int RowPtr, int SubPage);
-
-    private record struct LeafSplit(byte[] LeftMaxKey, byte[] RightMaxKey, int NewSiblingPage);
 }

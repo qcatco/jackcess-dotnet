@@ -15,6 +15,9 @@ public sealed class PageFile : IDisposable
     /// <summary>Pages read since the file was opened: what tests measure an operation's cost in.</summary>
     internal long ReadCount { get; private set; }
 
+    // Pages read through ReadKeptPage, as last read or written here.
+    private readonly Dictionary<int, byte[]> _kept = new();
+
     /// <summary>
     /// LVAL pages whose space a deleted long value freed in this session (LvalFree), by column, for that column's later
     /// values to use again (LvalWriter). A hint: a page is read, and checked against the writing column's usage map,
@@ -71,6 +74,23 @@ public sealed class PageFile : IDisposable
         return Codec.DecodePage(buffer, pageNumber);
     }
 
+    /// <summary>
+    /// As <see cref="ReadPage"/>, for a page every page appended consults (the header,
+    /// the global usage map): read from the file once, then kept as written here. The
+    /// copy returned is the caller's to change. A file has one writer: like the rest of
+    /// this library, it does not see what another handle on the file writes - another
+    /// Database open on it, in this process or another - while it is open.
+    /// </summary>
+    internal byte[] ReadKeptPage(int pageNumber)
+    {
+        if (!_kept.TryGetValue(pageNumber, out var page))
+        {
+            page = ReadPage(pageNumber);
+            _kept[pageNumber] = page;
+        }
+        return (byte[])page.Clone();
+    }
+
     public void WritePage(int pageNumber, byte[] data)
     {
         if (pageNumber < 0)
@@ -90,6 +110,8 @@ public sealed class PageFile : IDisposable
         _stream.Seek(offset, SeekOrigin.Begin);
         _stream.Write(encoded, 0, encoded.Length);
         _stream.Flush();
+        if (_kept.ContainsKey(pageNumber))
+            _kept[pageNumber] = (byte[])data.Clone();
     }
 
     public void ReplaceWith(Stream source)
@@ -97,6 +119,7 @@ public sealed class PageFile : IDisposable
         if (source is null)
             throw new ArgumentNullException(nameof(source));
 
+        _kept.Clear();
         _stream.Seek(0, SeekOrigin.Begin);
         _stream.SetLength(0);
         source.CopyTo(_stream);

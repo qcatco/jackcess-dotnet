@@ -441,9 +441,8 @@ public sealed class Database : IDisposable
     /// <param name="name">Table name (must be unique in the database).</param>
     /// <param name="columns">Column definitions (use <see cref="ColumnBuilder"/>).</param>
     /// <param name="primaryKey">
-    ///   Optional name of the primary-key column.  A structurally valid but
-    ///   empty index leaf page is created; B-tree maintenance on insert is not
-    ///   yet implemented.
+    ///   Optional name of the primary-key column. Its index is kept as rows are
+    ///   inserted, deleted and updated.
     /// </param>
     public Table CreateTable(string name, IReadOnlyList<Column> columns, string? primaryKey = null)
         => CreateTableCore(name, columns, primaryKey is null ? null : new[] { primaryKey });
@@ -472,11 +471,34 @@ public sealed class Database : IDisposable
 
         var format = _file.Format;
 
+        // Everything that can refuse the table does so before a page is added: the key, the
+        // definition (laid out once with no pages), the name and the catalog.
+        if (pkColumns is { Count: > 0 })
+        {
+            foreach (string pk in pkColumns)
+            {
+                var pkColumn = columns.FirstOrDefault(c => string.Equals(c.Name, pk, StringComparison.OrdinalIgnoreCase))
+                    ?? throw new InvalidOperationException($"Primary key column '{pk}' not found in table '{name}'.");
+                if (!IndexKeys.CanEncode(pkColumn))
+                    throw new NotSupportedException(
+                        $"A primary key on '{pk}' is not supported: {IndexKeys.WhyNot(pkColumn)}, " +
+                        "so its index entries would not be the ones Access writes.");
+            }
+        }
+        new TableDefinition(name, columns)
+        {
+            PrimaryKeyIndexPage   = pkColumns is { Count: > 0 } ? 1 : 0,
+            PrimaryKeyColumnNames = pkColumns ?? Array.Empty<string>(),
+        }.Serialize(format);
+        _catalog.EnsureCanRegister(name);
+
         // 1. Allocate the TDEF page (content written in step 3).
         int tdefPage = _allocator.AllocatePage();
 
-        // 2. Allocate the usage-map page (owned pages + free-space maps).
-        int umapPage = _allocator.AllocateUmapPage();
+        // 2. Allocate the usage-map page: owned pages, free space, and with a primary
+        //    key a third map for the key's index pages, where Access keeps it.
+        bool hasPk = pkColumns is { Count: > 0 };
+        int umapPage = _allocator.AllocateUmapPage(hasPk ? 3 : 2);
 
         // 3. Allocate a LVAL usage-map page for each Memo/OLE column (must happen before
         //    Serialize so the page numbers can be embedded in the TDEF).
@@ -511,7 +533,10 @@ public sealed class Database : IDisposable
         if (pkColumns is { Count: > 0 })
         {
             var idxWriter = new IndexWriter(_file, _allocator);
-            tableDef.PrimaryKeyIndexPage = idxWriter.CreatePrimaryKeyIndex(tableDef, pkColumns);
+            tableDef.PrimaryKeyIndexPage      = idxWriter.CreatePrimaryKeyIndex(tableDef, pkColumns);
+            tableDef.PrimaryKeyIndexUmapPage  = umapPage;
+            tableDef.PrimaryKeyIndexUmapRow   = 2;
+            UsageMap.AddPage(_file, _allocator, umapPage, 2, tableDef.PrimaryKeyIndexPage);
             if (pkColumns.Count == 1)
                 tableDef.PrimaryKeyColumnName = pkColumns[0];
             else
@@ -561,7 +586,9 @@ public sealed class Database : IDisposable
         var pkIndex = info.Indexes.FirstOrDefault(ix => ix.IsPrimaryKey);
         if (pkIndex is not null && pkIndex.Columns.Count > 0)
         {
-            tableDef.PrimaryKeyIndexPage = pkIndex.RootPageNumber;
+            tableDef.PrimaryKeyIndexPage       = pkIndex.RootPageNumber;
+            tableDef.PrimaryKeyIndexUmapPage   = pkIndex.UsedPagesUmapPage;
+            tableDef.PrimaryKeyIndexUmapRow    = pkIndex.UsedPagesUmapRow;
             if (pkIndex.Columns.Count == 1)
                 tableDef.PrimaryKeyColumnName = pkIndex.Columns[0].Column.Name;
             else
