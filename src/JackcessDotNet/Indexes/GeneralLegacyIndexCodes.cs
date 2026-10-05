@@ -9,10 +9,10 @@ namespace JackcessDotNet;
 /// using the "general legacy" sort order (Access 2000-2007 default).
 ///
 /// Direct port of <c>io.github.spannm.jackcess.impl.GeneralLegacyIndexCodes</c>.
-/// Per-codepoint code tables for the basic Latin-1 block (U+0000..U+00FF) are
-/// loaded from the embedded <c>index_codes_genleg.txt</c> resource at startup;
-/// characters &gt; U+00FF are treated as IGNORED (a known limitation — those
-/// require the EXT codes file which is not yet ported).
+/// Per-codepoint code tables are loaded from embedded resources: the basic
+/// Latin-1 block (U+0000..U+00FF) from <c>index_codes_genleg.txt</c> at startup,
+/// and U+0100..U+FFFF (less the surrogates) from <c>index_codes_ext_genleg.txt</c>
+/// on first use. A code in those files drops its leading zero ("C" is 0x0C).
 ///
 /// Output byte stream layout for a text value:
 ///   [inline bytes per char]
@@ -83,11 +83,11 @@ internal static class GeneralLegacyIndexCodes
             var handler = GetCharHandler(c);
             int curCharOffset = charOffset;
 
-            byte[]? inline = handler.GetInlineBytes();
+            byte[]? inline = handler.GetInlineBytes(c);
             if (inline is not null)
             {
                 bout.Write(inline, 0, inline.Length);
-                charOffset++;
+                charOffset += Positions(c);
             }
 
             if (handler.Kind == HandlerKind.Simple) continue;
@@ -161,6 +161,22 @@ internal static class GeneralLegacyIndexCodes
         return bout.ToArray();
     }
 
+    /// <summary>
+    /// The positions a character takes in the extra and unprintable codes: one,
+    /// except for a character Access sorts as two or three letters (Æ as AE, ß as
+    /// ss, ﬃ as ffi), which takes one per letter. The codes files do not say which
+    /// those are, so this is the list ACE 16 wrote for every character of the BMP
+    /// placed before an accented letter.
+    /// </summary>
+    private static int Positions(char c) => c switch
+    {
+        '\u00C6' or '\u00DE' or '\u00DF' or '\u00E6' or '\u00FE' or '\u0132' or '\u0133' or '\u0152' or '\u0153'
+            or '\u01C7' or '\u01C8' or '\u01C9' or '\u01CA' or '\u01CB' or '\u01CC' or '\u01F1' or '\u01F2' or '\u01F3'
+            or '\u05F0' or '\u05F1' or '\u05F2' or '\uFB00' or '\uFB01' or '\uFB02' or '\uFB05' or '\uFB06' => 2,
+        '\uFB03' or '\uFB04' => 3,
+        _ => 1,
+    };
+
     private static string ToIndexCharSequence(object value)
     {
         string str = value?.ToString() ?? string.Empty;
@@ -179,9 +195,11 @@ internal static class GeneralLegacyIndexCodes
         if (c <= 0xFF) return _basicCodes[c];
 
         // The EXT codes file covers U+0100..U+FFFF excluding the surrogate range
-        // U+D800..U+DFFF (Jackcess writes these as IGNORED via dedicated handlers).
-        // Convert the codepoint into an index into the EXT array, skipping over the
-        // 2048-codepoint surrogate hole that isn't represented in the file.
+        // U+D800..U+DFFF. Access leaves surrogates out of a key altogether (ACE 16
+        // writes the same key for "a\U0001F600b" as for "ab"; Jackcess computes
+        // codes for them, which Access does not write). Convert the codepoint into
+        // an index into the EXT array, skipping over the 2048-codepoint surrogate
+        // hole that isn't represented in the file.
         if (c >= FirstHighSurrogate && c <= LastLowSurrogate)
             return IgnoredHandler.Instance;
 
@@ -299,7 +317,7 @@ internal static class GeneralLegacyIndexCodes
     private abstract class CharHandler
     {
         public abstract HandlerKind Kind { get; }
-        public virtual byte[]? GetInlineBytes()      => null;
+        public virtual byte[]? GetInlineBytes(char c)=> null;
         public virtual byte[]? GetExtraBytes()       => null;
         public virtual byte[]? GetUnprintableBytes() => null;
         public virtual byte    GetExtraByteModifier()=> 0;
@@ -317,7 +335,7 @@ internal static class GeneralLegacyIndexCodes
         private readonly byte[] _bytes;
         public SimpleHandler(byte[] bytes) => _bytes = bytes;
         public override HandlerKind Kind => HandlerKind.Simple;
-        public override byte[] GetInlineBytes() => _bytes;
+        public override byte[] GetInlineBytes(char c) => _bytes;
     }
 
     private sealed class InternationalHandler : CharHandler
@@ -326,7 +344,7 @@ internal static class GeneralLegacyIndexCodes
         private readonly byte[] _extraBytes;
         public InternationalHandler(byte[] bytes, byte[] extra) { _bytes = bytes; _extraBytes = extra; }
         public override HandlerKind Kind => HandlerKind.International;
-        public override byte[] GetInlineBytes() => _bytes;
+        public override byte[] GetInlineBytes(char c) => _bytes;
         public override byte[] GetExtraBytes()  => _extraBytes;
     }
 
@@ -349,13 +367,13 @@ internal static class GeneralLegacyIndexCodes
     private sealed class InternationalExtHandler : CharHandler
     {
         private readonly byte[] _bytes;
-        private readonly byte[] _extraBytes;
+        private readonly byte[]? _extraBytes;
         private readonly byte _crazyFlag;
-        public InternationalExtHandler(byte[] bytes, byte[] extra, byte crazyFlag)
+        public InternationalExtHandler(byte[] bytes, byte[]? extra, byte crazyFlag)
         { _bytes = bytes; _extraBytes = extra; _crazyFlag = crazyFlag; }
         public override HandlerKind Kind => HandlerKind.InternationalExt;
-        public override byte[] GetInlineBytes() => _bytes;
-        public override byte[] GetExtraBytes()  => _extraBytes;
+        public override byte[] GetInlineBytes(char c) => _bytes;
+        public override byte[]? GetExtraBytes() => _extraBytes;
         public override byte   GetCrazyFlag()   => _crazyFlag;
     }
 
@@ -364,7 +382,7 @@ internal static class GeneralLegacyIndexCodes
         private readonly byte[] _bytes;
         public SignificantHandler(byte[] bytes) => _bytes = bytes;
         public override HandlerKind Kind => HandlerKind.Significant;
-        public override byte[] GetInlineBytes() => _bytes;
+        public override byte[] GetInlineBytes(char c) => _bytes;
     }
 
     /// <summary>
@@ -393,12 +411,8 @@ internal static class GeneralLegacyIndexCodes
         var values = new CharHandler[numCodes];
         for (int i = 0; i < numCodes; i++)
         {
-            string? line = reader.ReadLine();
-            if (line is null)
-            {
-                values[i] = IgnoredHandler.Instance;
-                continue;
-            }
+            string line = reader.ReadLine()
+                ?? throw new InvalidDataException($"'{resourceName}' ends at line {i + 1} of {numCodes}.");
             values[i] = ParseCodeLine(line);
         }
         return values;
@@ -406,73 +420,57 @@ internal static class GeneralLegacyIndexCodes
 
     private static CharHandler ParseCodeLine(string line)
     {
-        if (string.IsNullOrEmpty(line)) return IgnoredHandler.Instance;
+        if (line.Length == 0) throw new InvalidDataException("Empty index code line.");
         char prefix = line[0];
         string suffix = line.Length > 1 ? line.Substring(1) : string.Empty;
 
-        try
+        // A malformed line throws: the files are embedded, so it is a build
+        // defect, and treating the character as IGNORED would write keys Access
+        // cannot find.
+        return prefix switch
         {
-            return prefix switch
-            {
-                'X' => IgnoredHandler.Instance,
-                'S' => new SimpleHandler        (HexToBytes(suffix)),
-                'U' => new UnprintableHandler   (HexToBytes(suffix)),
-                'P' => ParseUnprintableExt      (suffix),
-                'I' => ParseInternational       (suffix),
-                'Z' => ParseInternationalExt    (suffix),
-                'G' => new SignificantHandler   (HexToBytes(suffix)),
-                'Q' => IgnoredHandler.Instance,
-                _   => IgnoredHandler.Instance,
-            };
-        }
-        catch
-        {
-            // Malformed lines (typically single-hex-digit entries like "PC" that
-            // strict 2-char-pair parsing rejects) are treated as IGNORED rather
-            // than blowing up at load time. Matches Jackcess Java's effective
-            // behaviour, since its codes are loaded lazily per-character.
-            return IgnoredHandler.Instance;
-        }
-    }
-
-    private static CharHandler ParseUnprintableExt(string suffix)
-    {
-        byte[] bytes = HexToBytes(suffix);
-        if (bytes.Length < 1) return IgnoredHandler.Instance;
-        return new UnprintableExtHandler(bytes[0]);
+            'X' => IgnoredHandler.Instance,
+            'S' => new SimpleHandler        (HexToBytes(suffix)),
+            'U' => new UnprintableHandler   (HexToBytes(suffix)),
+            'P' => new UnprintableExtHandler(HexToBytes(suffix)[0]),
+            'I' => ParseInternational       (suffix),
+            'Z' => ParseInternationalExt    (suffix),
+            'G' => new SignificantHandler   (HexToBytes(suffix)),
+            'Q' => IgnoredHandler.Instance,
+            _   => throw new InvalidDataException($"Unknown index code line '{line}'."),
+        };
     }
 
     private static CharHandler ParseInternational(string suffix)
     {
         // "I" type: "inline_hex,extra_hex"
         var parts = suffix.Split(',');
-        var inline = HexToBytes(parts[0]);
-        var extra  = parts.Length > 1 ? HexToBytes(parts[1]) : Array.Empty<byte>();
-        return new InternationalHandler(inline, extra);
+        return new InternationalHandler(HexToBytes(parts[0]), HexToBytes(parts[1]));
     }
 
     private static CharHandler ParseInternationalExt(string suffix)
     {
-        // "Z" type: "inline_hex,extra_hex,1_or_2"
+        // "Z" type: "inline_hex,extra_hex,1_or_2". The extra codes may be empty,
+        // and then the character adds none (not an empty run, which would still
+        // count as a character in the extra codes and shift every later one).
         var parts = suffix.Split(',');
-        var inline = HexToBytes(parts[0]);
-        var extra  = parts.Length > 1 ? HexToBytes(parts[1]) : Array.Empty<byte>();
-        byte crazy = parts.Length > 2 && parts[2] == "1" ? CrazyCode1 : CrazyCode2;
-        return new InternationalExtHandler(inline, extra, crazy);
+        byte[]? extra = parts[1].Length == 0 ? null : HexToBytes(parts[1]);
+        byte crazy = parts[2] == "1" ? CrazyCode1 : CrazyCode2;
+        return new InternationalExtHandler(HexToBytes(parts[0]), extra, crazy);
     }
 
     /// <summary>
-    /// Mirrors Jackcess Java's hex-byte parser: takes <c>hex.Length / 2</c> bytes from
-    /// the start; odd trailing chars are silently dropped. The codes file relies on
-    /// that convention — entries like "U3" yield an empty byte array, and "S803"
-    /// yields a single 0x80 byte (the "3" is discarded).
+    /// Mirrors Jackcess Java's <c>codesToBytes</c>: the files drop a code's leading
+    /// zero, so an odd number of digits gets one back. "C" is 0x0C, "S7" (the
+    /// space) is 0x07, and "803" is 0x08 0x03. An empty code is a defect.
     /// </summary>
     private static byte[] HexToBytes(string hex)
     {
-        if (string.IsNullOrEmpty(hex)) return Array.Empty<byte>();
-        int numBytes = hex.Length / 2;
-        var result = new byte[numBytes];
-        for (int i = 0; i < numBytes; i++)
+        if (string.IsNullOrEmpty(hex))
+            throw new InvalidDataException("Empty index code.");
+        if (hex.Length % 2 != 0) hex = "0" + hex;
+        var result = new byte[hex.Length / 2];
+        for (int i = 0; i < result.Length; i++)
             result[i] = byte.Parse(hex.Substring(i * 2, 2), NumberStyles.HexNumber, CultureInfo.InvariantCulture);
         return result;
     }

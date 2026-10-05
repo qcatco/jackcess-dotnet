@@ -17,4 +17,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\JackcessDotNet\JackcessDotNet.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="IndexKeys\general-legacy-ace16.tsv" LogicalName="JackcessDotNet.Tests.general-legacy-ace16.tsv" />
+  </ItemGroup>
 </Project>
