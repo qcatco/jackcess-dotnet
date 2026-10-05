@@ -35,6 +35,16 @@ internal sealed class FreedLvalPages
     }
 
     /// <summary>
+    /// Notes the room <paramref name="page"/> has now if the column has it noted already - a page it freed - and leaves
+    /// any other page alone.
+    /// </summary>
+    public void Renew(int mapPage, int mapRow, int page, int freeSpace)
+    {
+        if (_byColumn.TryGetValue((mapPage, mapRow), out var pages) && pages.ContainsKey(page))
+            Set(mapPage, mapRow, page, freeSpace);
+    }
+
+    /// <summary>
     /// The pages of the column whose owned-pages map is at (<paramref name="mapPage"/>, <paramref name="mapRow"/>),
     /// lowest first, each with the room it had when last seen. Not to be enumerated across a <see cref="Set"/>.
     /// </summary>

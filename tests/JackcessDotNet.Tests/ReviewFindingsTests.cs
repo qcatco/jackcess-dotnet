@@ -154,19 +154,34 @@ public sealed class ReviewFindingsTests : IDisposable
         return bytes;
     }
 
-    /// <summary>Runs <paramref name="scenario"/> on a database of its own, deleted afterwards.</summary>
-    private static T InAnotherDatabase<T>(Func<Database, T> scenario)
+    /// <summary>
+    /// Runs <paramref name="scenario"/> on a database of its own, then <paramref name="afterReopening"/> on the file
+    /// reopened, and deletes it.
+    /// </summary>
+    private static T InAnotherDatabase<T>(Func<Database, T> scenario, Action<Database> afterReopening)
     {
         string path = Path.Combine(Path.GetTempPath(), $"review_{Guid.NewGuid():N}.mdb");
         try
         {
-            using var db = Database.Create(path, JetVersion.Jet4);
-            return scenario(db);
+            T result;
+            using (var db = Database.Create(path, JetVersion.Jet4))
+                result = scenario(db);
+            using (var db = Database.Open(path))
+                afterReopening(db);
+            return result;
         }
         finally
         {
             if (File.Exists(path)) File.Delete(path);
         }
+    }
+
+    /// <summary>The values <see cref="ReadsForInserts"/> wrote, read back: a value written to the wrong place shows.</summary>
+    private static void AssertInsertedValues(Table table, int count)
+    {
+        var rows = table.ReadAllRows().ToDictionary(r => (int)r["Id"]!);
+        for (int i = 0; i < count; i++)
+            Assert.Equal(Bytes(3_000, 100 + i), rows[100 + i]["Blob"]);
     }
 
     /// <summary>The pages each insert into <paramref name="table"/> of a 3,000-byte value reads.</summary>
@@ -196,6 +211,11 @@ public sealed class ReviewFindingsTests : IDisposable
             b.Insert(new Row { ["Id"] = 1, ["Blob"] = Bytes(3_000, 2) });
             if (deleteFromA) a.DeleteRow("Id", 1);
             return ReadsForInserts(db, b, 3);
+        }, reopened =>
+        {
+            AssertInsertedValues(reopened.GetTable("B"), 3);
+            Assert.Equal(Bytes(3_000, 2), reopened.GetTable("B").ReadAllRows().Single(r => (int)r["Id"]! == 1)["Blob"]);
+            Assert.Equal(deleteFromA ? 0 : 1, reopened.GetTable("A").ReadAllRows().Count);
         });
 
         Assert.Equal(InsertsIntoB(deleteFromA: false), InsertsIntoB(deleteFromA: true));
@@ -214,6 +234,11 @@ public sealed class ReviewFindingsTests : IDisposable
             int pagesBefore = LvalPages(db, table, "Blob").Count;
             long[] reads = ReadsForInserts(db, table, 5);
             return (reads, LvalPages(db, table, "Blob").Count - pagesBefore);
+        }, reopened =>
+        {
+            var table = reopened.GetTable("T");
+            AssertInsertedValues(table, 5);
+            Assert.Equal(deleteIt ? 5 : 6, table.ReadAllRows().Count);
         });
 
         var kept = InsertsAfterABigValue(deleteIt: false);

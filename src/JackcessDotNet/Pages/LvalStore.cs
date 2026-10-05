@@ -104,16 +104,18 @@ internal sealed class LvalWriter
     /// Chooses the LVAL pages a value's chunk rows go to, and the row each takes there: pages of this column whose
     /// space a deleted value freed earlier in the session (<see cref="PageFile.FreedLvalPages"/>), then the column's
     /// last page, and a new page when none has room. A freed page is read only when it was last seen with room for the
-    /// chunk, at most once a value, and the room it has left is noted when the value is written. Looking through every
+    /// chunk, at most once a value, and the room left on the pages the column has noted is noted again when the value
+    /// is written. Looking through every
     /// page the column owned for room read the whole column on every write, so each write was slower than the last;
     /// the freed pages keep what that bought - a deleted value's space is used again.
     /// </summary>
     private sealed class PagePicker
     {
         private readonly LvalWriter _writer;
-        private readonly IEnumerator<KeyValuePair<int, int>> _freed;   // this column's freed pages, lowest first, and their room
-        private readonly List<int> _freedRead = new();                  // the freed pages read, whose room is noted again
-        private readonly List<int> _open = new();                       // pages read or allocated, with room left
+        private IEnumerator<KeyValuePair<int, int>>? _freed;   // this column's freed pages, lowest first, and their room
+        private int _freedWalkedFor = int.MaxValue;            // the smallest chunk they have been walked for
+        private readonly HashSet<int> _freedRead = new();      // the freed pages read
+        private readonly List<int> _open = new();              // pages read or allocated, with room left
         private readonly Dictionary<int, int> _free = new();
         private readonly Dictionary<int, int> _rows = new();
         private bool _lastPageRead;
@@ -121,7 +123,6 @@ internal sealed class LvalWriter
         public PagePicker(LvalWriter writer)
         {
             _writer = writer;
-            _freed = writer._file.FreedLvalPages.Of(writer._umap.OwnedPage, writer._umap.OwnedRow).GetEnumerator();
         }
 
         /// <summary>A page with room for a chunk row of <paramref name="needed"/> bytes, its slot included, and the
@@ -154,16 +155,22 @@ internal sealed class LvalWriter
             return -1;
         }
 
-        // A value's chunks never grow - full ones, then the last - so a freed page passed over as too small for one is
-        // not looked at again for this value. It stays noted, for a smaller value later.
+        // A value's chunks never grow - full ones, then the last - so the freed pages are walked once for the full
+        // chunks, and again for a last chunk smaller than them: a page passed over as too small for a full chunk may take
+        // the last. Nothing is noted while a value is planned, so a walk sees the records as the first one did, and a
+        // page already read is not read again.
         private int FreedPageWithRoom(int needed)
         {
+            if (_freed is null || needed < _freedWalkedFor)
+            {
+                _freed = _writer._file.FreedLvalPages.Of(_writer._umap.OwnedPage, _writer._umap.OwnedRow).GetEnumerator();
+                _freedWalkedFor = needed;
+            }
             while (_freed.MoveNext())
             {
                 (int page, int room) = (_freed.Current.Key, _freed.Current.Value);
-                if (room < needed || _free.ContainsKey(page))
+                if (room < needed || _free.ContainsKey(page) || !_freedRead.Add(page))
                     continue;
-                _freedRead.Add(page);
                 // Freed from a value of this column, so on its map - unless the file says otherwise.
                 if (UsageMap.Contains(_writer._file, _writer._umap.OwnedPage, _writer._umap.OwnedRow, page)
                     && Read(page) && HasRoom(page, needed))
@@ -212,13 +219,25 @@ internal sealed class LvalWriter
             return true;
         }
 
-        /// <summary>Notes the room left on the freed pages this value read - none on one that is not this column's
-        /// long-value page - once its chunks are written.</summary>
+        /// <summary>
+        /// Once the value's chunks are written: forgets a freed page that was not this column's long-value page, and
+        /// notes the room left on every page read or written that the column has noted - a freed page reached as the
+        /// column's last page too - as none on a page holding as many rows as a page can.
+        /// </summary>
         public void Done()
         {
             var umap = _writer._umap;
+            var records = _writer._file.FreedLvalPages;
             foreach (int page in _freedRead)
-                _writer._file.FreedLvalPages.Set(umap.OwnedPage, umap.OwnedRow, page, _free.TryGetValue(page, out int free) ? free : 0);
+            {
+                if (!_free.ContainsKey(page))
+                    records.Set(umap.OwnedPage, umap.OwnedRow, page, 0);
+            }
+            foreach (var entry in _free)
+            {
+                int room = _rows[entry.Key] < DataPageWriter.MaxRowsPerPage ? entry.Value : 0;
+                records.Renew(umap.OwnedPage, umap.OwnedRow, entry.Key, room);
+            }
         }
     }
 
