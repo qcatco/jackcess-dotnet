@@ -25,6 +25,9 @@ public sealed class Table
         _owningDb    = owningDb;
     }
 
+    /// <summary>The table's definition, for tests that look at its pages.</summary>
+    internal TableDefinition Definition => _definition;
+
     // ── Public properties ─────────────────────────────────────────────────────
 
     public string                Name    => _definition.Name;

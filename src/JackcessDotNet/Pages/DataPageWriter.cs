@@ -86,27 +86,33 @@ public sealed class DataPageWriter
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The most rows a page may hold: Jet addresses a row on its page with one byte (Jackcess's
+    /// MAX_NUM_ROWS_ON_DATA_PAGE).
+    /// </summary>
+    internal const int MaxRowsPerPage = 255;
+
     private int FindOrAllocateDataPage(TableDefinition tableDef, int rowDataSize, JetFormat format)
     {
         int needed = rowDataSize + JetFormat.SizeRowEntry;   // data bytes + one slot
 
-        // Consult the owned-pages usage-map for existing pages with enough room.
-        byte[] umapPage  = _file.ReadPage(tableDef.UmapPageNumber);
-        var    ownedList = UsageMap.GetOwnedPages(umapPage, tableDef.OwnedPagesRow, format, _file);
-
-        foreach (int pageNum in ownedList)
+        // The table's last page, when it is one of its data pages with room - as Access and Java Jackcess add rows.
+        // Looking through every owned page for room read the whole table on every insert, so each insert was
+        // slower than the last, and it put rows ahead of rows inserted before them.
+        int last = UsageMap.GetLastPage(_file, tableDef.UmapPageNumber, tableDef.OwnedPagesRow);
+        if (last >= 0)
         {
-            var   dp        = _file.ReadPage(pageNum);
-            short freeSpace = ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace);
-            if (freeSpace >= needed)
-                return pageNum;
+            byte[] dp = _file.ReadPage(last);
+            if (dp[0] == JetFormat.PageTypeData
+                && ByteUtil.GetInt(dp, JetFormat.OffsetDataTdefPage) == tableDef.TdefPageNumber
+                && ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace) >= needed
+                && ByteUtil.GetShort(dp, format.OffsetDataNumRows) < MaxRowsPerPage)
+                return last;
         }
 
         // Allocate a fresh data page and register it in the usage-map.
         int newPage = _allocator.AllocateDataPage(tableDef.TdefPageNumber);
-        umapPage = _file.ReadPage(tableDef.UmapPageNumber);  // re-read (may have been evicted)
-        UsageMap.AddPage(umapPage, tableDef.OwnedPagesRow, newPage, format);
-        _file.WritePage(tableDef.UmapPageNumber, umapPage);
+        UsageMap.AddPage(_file, _allocator, tableDef.UmapPageNumber, tableDef.OwnedPagesRow, newPage);
 
         return newPage;
     }
@@ -121,6 +127,9 @@ public sealed class DataPageWriter
         if (freeSpace < needed)
             throw new InvalidOperationException(
                 $"Data page {pageNumber} has only {freeSpace} free bytes; row needs {needed}.");
+        if (rowCount >= MaxRowsPerPage)
+            throw new InvalidOperationException(
+                $"Data page {pageNumber} already holds {rowCount} rows, the most a page can.");
 
         // cursor = first byte of the free gap (grows up), which also equals the
         // left-edge of the already-written data area when rearranged:
