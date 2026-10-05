@@ -16,11 +16,11 @@ public sealed class PageFile : IDisposable
     internal long ReadCount { get; private set; }
 
     /// <summary>
-    /// LVAL pages whose space a deleted long value freed in this session (LvalFree), for later values to use
-    /// again (LvalWriter). A hint: a page is read, and checked against the writing column's usage map, before any
-    /// row goes onto it.
+    /// LVAL pages whose space a deleted long value freed in this session (LvalFree), by column, for that column's later
+    /// values to use again (LvalWriter). A hint: a page is read, and checked against the writing column's usage map,
+    /// before any row goes onto it.
     /// </summary>
-    internal HashSet<int> FreedLvalPages { get; } = new HashSet<int>();
+    internal FreedLvalPages FreedLvalPages { get; } = new FreedLvalPages();
 
     /// <summary>
     /// Per-page codec applied on every Read/Write. Default is the identity

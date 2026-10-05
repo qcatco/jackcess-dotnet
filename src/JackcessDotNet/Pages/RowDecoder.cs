@@ -156,10 +156,10 @@ internal sealed class RowDecoder
 
     /// <summary>
     /// Scans all long-value (Memo/OLE) columns in <paramref name="rowBytes"/> and yields
-    /// the LVAL page/row coordinates for any that hold an OTHER_PAGE (0x40) LvRef.
+    /// the LVAL page/row coordinates for any that hold an OTHER_PAGE (0x40) LvRef, with the column holding it.
     /// Used to locate LVAL chains that must be freed before a row is deleted or updated.
     /// </summary>
-    public IEnumerable<(int lvalPage, int lvalRow, bool chained)> GetOtherPageLvRefs(byte[] rowBytes)
+    public IEnumerable<(Column column, int lvalPage, int lvalRow, bool chained)> GetOtherPageLvRefs(byte[] rowBytes)
     {
         if (rowBytes is null || rowBytes.Length < _format.SizeRowColumnCount)
             yield break;
@@ -234,7 +234,7 @@ internal sealed class RowDecoder
                          | (rowBytes[varStart + 6] << 8)
                          | (rowBytes[varStart + 7] << 16);
 
-            yield return (lvalPage, lvalRow, chained);
+            yield return (col, lvalPage, lvalRow, chained);
         }
     }
 

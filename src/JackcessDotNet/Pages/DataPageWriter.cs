@@ -237,7 +237,7 @@ public sealed class DataPageWriter
                 new RowEncoder(format, columns).Validate(merged);
 
                 // Free any LVAL chains referenced by the old row before overwriting.
-                FreeRowLvalChains(rowBytes, decoder);
+                FreeRowLvalChains(table, rowBytes, decoder);
 
                 // Mark the original slot as deleted (bit 15).
                 ByteUtil.PutUShort(dp, slotOff, (ushort)(slotVal | 0x8000u));
@@ -314,7 +314,7 @@ public sealed class DataPageWriter
                 if (!PrimaryKeysEqual(colVal, value)) continue;
 
                 // Free any LVAL chains referenced by this row.
-                FreeRowLvalChains(rowBytes, decoder);
+                FreeRowLvalChains(table, rowBytes, decoder);
 
                 // Mark the slot as deleted.
                 ByteUtil.PutUShort(dp, slotOff, (ushort)(slotVal | 0x8000u));
@@ -329,12 +329,16 @@ public sealed class DataPageWriter
 
     // ── Shared helpers ────────────────────────────────────────────────────────
 
-    // Frees every OTHER_PAGE LVAL chain referenced by the given row bytes.
-    private void FreeRowLvalChains(byte[] rowBytes, RowDecoder decoder)
+    // Frees every OTHER_PAGE LVAL chain referenced by the given row bytes. The room each page gains is noted for the
+    // column the value was in (its owned-pages map), whose later values may use it.
+    private void FreeRowLvalChains(TableDefinition table, byte[] rowBytes, RowDecoder decoder)
     {
         var lvalFree = new LvalFree(_file);
-        foreach (var (lvalPage, lvalRow, chained) in decoder.GetOtherPageLvRefs(rowBytes))
-            lvalFree.FreeChain(lvalPage, lvalRow, chained);
+        foreach (var (column, lvalPage, lvalRow, chained) in decoder.GetOtherPageLvRefs(rowBytes))
+        {
+            LvalUmapRef? owner = table.LvalColumnUmapPages.TryGetValue(column.Name, out var umap) ? umap : null;
+            lvalFree.FreeChain(lvalPage, lvalRow, chained, owner);
+        }
     }
 
     private static bool PrimaryKeysEqual(object? stored, object? requested)

@@ -100,91 +100,125 @@ internal sealed class LvalWriter
         return BuildLvRef(totalLen, LvalTypeOtherPages, placements[0].page, placements[0].row);
     }
 
-    /// <summary>A freed page with less room than this is dropped from <see cref="PageFile.FreedLvalPages"/>.</summary>
-    private const int MinUsefulFreeSpace = 64;
-
     /// <summary>
     /// Chooses the LVAL pages a value's chunk rows go to, and the row each takes there: pages of this column whose
     /// space a deleted value freed earlier in the session (<see cref="PageFile.FreedLvalPages"/>), then the column's
-    /// last page, and a new page when none has room. Each candidate is read once per value. Looking through every
+    /// last page, and a new page when none has room. A freed page is read only when it was last seen with room for the
+    /// chunk, at most once a value, and the room it has left is noted when the value is written. Looking through every
     /// page the column owned for room read the whole column on every write, so each write was slower than the last;
     /// the freed pages keep what that bought - a deleted value's space is used again.
     /// </summary>
     private sealed class PagePicker
     {
         private readonly LvalWriter _writer;
-        private readonly List<int> _pages = new();
+        private readonly IEnumerator<KeyValuePair<int, int>> _freed;   // this column's freed pages, lowest first, and their room
+        private readonly List<int> _freedRead = new();                  // the freed pages read, whose room is noted again
+        private readonly List<int> _open = new();                       // pages read or allocated, with room left
         private readonly Dictionary<int, int> _free = new();
         private readonly Dictionary<int, int> _rows = new();
+        private bool _lastPageRead;
 
         public PagePicker(LvalWriter writer)
         {
             _writer = writer;
-            var file = writer._file;
-            var umap = writer._umap;
-            foreach (int page in file.FreedLvalPages.OrderBy(p => p))
-            {
-                if (UsageMap.Contains(file, umap.OwnedPage, umap.OwnedRow, page))
-                    Consider(page);
-            }
-            int last = UsageMap.GetLastPage(file, umap.OwnedPage, umap.OwnedRow);
-            if (last >= 0 && !_free.ContainsKey(last))
-                Consider(last);
-        }
-
-        private void Consider(int page)
-        {
-            byte[] dp = _writer._file.ReadPage(page);
-            // Only a long-value page: type 0x01 with "LVAL" at bytes 4-7, as AllocateLvalPage writes one. A map that
-            // lists any other page last - another table's data page - must not have chunks written onto it.
-            if (dp[0] != JetFormat.PageTypeData || dp[4] != (byte)'L' || dp[5] != (byte)'V' || dp[6] != (byte)'A' || dp[7] != (byte)'L')
-                return;
-            _pages.Add(page);
-            _free[page] = ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace);
-            _rows[page] = ByteUtil.GetShort(dp, _writer._format.OffsetDataNumRows);
+            _freed = writer._file.FreedLvalPages.Of(writer._umap.OwnedPage, writer._umap.OwnedRow).GetEnumerator();
         }
 
         /// <summary>A page with room for a chunk row of <paramref name="needed"/> bytes, its slot included, and the
         /// index the row takes there - allocating the page when none of the candidates has room.</summary>
         public (int page, int row) Reserve(int needed)
         {
-            int target = -1;
-            foreach (int page in _pages)
-            {
-                if (_free[page] >= needed && _rows[page] < DataPageWriter.MaxRowsPerPage)
-                {
-                    target = page;
-                    break;
-                }
-            }
-
-            if (target < 0)
-            {
-                // A fresh LVAL data page (it carries the "LVAL" signature Access requires at bytes 4-7).
-                // TODO: also track the page in the free-space umap (_umap.FreePage/FreeRow) like real
-                // Access; readers follow direct LvRef pointers, so omitting it costs only reuse
-                // efficiency, not correctness.
-                target = _writer._allocator.AllocateLvalPage();
-                UsageMap.AddPage(_writer._file, _writer._allocator, _writer._umap.OwnedPage, _writer._umap.OwnedRow, target);
-                _pages.Add(target);
-                _free[target] = _writer._format.DataPageInitialFreeSpace;
-                _rows[target] = 0;
-            }
+            int target = OpenPageWithRoom(needed);
+            if (target < 0) target = FreedPageWithRoom(needed);
+            if (target < 0) target = LastPageWithRoom(needed);
+            if (target < 0) target = NewPage();
 
             int row = _rows[target];
             _rows[target] = row + 1;
             _free[target] -= needed;
+            if (_free[target] < FreedLvalPages.MinUsefulFreeSpace)
+                _open.Remove(target);
             return (target, row);
         }
 
-        /// <summary>Drops the freed pages this value filled, so later values do not read them again.</summary>
+        private bool HasRoom(int page, int needed)
+            => _free[page] >= needed && _rows[page] < DataPageWriter.MaxRowsPerPage;
+
+        private int OpenPageWithRoom(int needed)
+        {
+            foreach (int page in _open)
+            {
+                if (HasRoom(page, needed))
+                    return page;
+            }
+            return -1;
+        }
+
+        // A value's chunks never grow - full ones, then the last - so a freed page passed over as too small for one is
+        // not looked at again for this value. It stays noted, for a smaller value later.
+        private int FreedPageWithRoom(int needed)
+        {
+            while (_freed.MoveNext())
+            {
+                (int page, int room) = (_freed.Current.Key, _freed.Current.Value);
+                if (room < needed || _free.ContainsKey(page))
+                    continue;
+                _freedRead.Add(page);
+                // Freed from a value of this column, so on its map - unless the file says otherwise.
+                if (UsageMap.Contains(_writer._file, _writer._umap.OwnedPage, _writer._umap.OwnedRow, page)
+                    && Read(page) && HasRoom(page, needed))
+                    return page;
+            }
+            return -1;
+        }
+
+        private int LastPageWithRoom(int needed)
+        {
+            if (_lastPageRead)
+                return -1;
+            _lastPageRead = true;
+            int last = UsageMap.GetLastPage(_writer._file, _writer._umap.OwnedPage, _writer._umap.OwnedRow);
+            return last >= 0 && (_free.ContainsKey(last) || Read(last)) && HasRoom(last, needed) ? last : -1;
+        }
+
+        private int NewPage()
+        {
+            // A fresh LVAL data page (it carries the "LVAL" signature Access requires at bytes 4-7).
+            // TODO: also track the page in the free-space umap (_umap.FreePage/FreeRow) like real
+            // Access; readers follow direct LvRef pointers, so omitting it costs only reuse
+            // efficiency, not correctness.
+            int page = _writer._allocator.AllocateLvalPage();
+            UsageMap.AddPage(_writer._file, _writer._allocator, _writer._umap.OwnedPage, _writer._umap.OwnedRow, page);
+            _free[page] = _writer._format.DataPageInitialFreeSpace;
+            _rows[page] = 0;
+            _open.Add(page);
+            return page;
+        }
+
+        /// <summary>
+        /// Reads the room and rows of <paramref name="page"/> - false, with nothing noted, unless it is a long-value
+        /// page: type 0x01 with "LVAL" at bytes 4-7, as AllocateLvalPage writes one. A map that lists any other page -
+        /// another table's data page - must not have chunks written onto it.
+        /// </summary>
+        private bool Read(int page)
+        {
+            byte[] dp = _writer._file.ReadPage(page);
+            if (dp[0] != JetFormat.PageTypeData || dp[4] != (byte)'L' || dp[5] != (byte)'V' || dp[6] != (byte)'A' || dp[7] != (byte)'L')
+                return false;
+            _free[page] = ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace);
+            _rows[page] = ByteUtil.GetShort(dp, _writer._format.OffsetDataNumRows);
+            if (_free[page] >= FreedLvalPages.MinUsefulFreeSpace)
+                _open.Add(page);
+            return true;
+        }
+
+        /// <summary>Notes the room left on the freed pages this value read - none on one that is not this column's
+        /// long-value page - once its chunks are written.</summary>
         public void Done()
         {
-            foreach (int page in _pages)
-            {
-                if (_free[page] < MinUsefulFreeSpace)
-                    _writer._file.FreedLvalPages.Remove(page);
-            }
+            var umap = _writer._umap;
+            foreach (int page in _freedRead)
+                _writer._file.FreedLvalPages.Set(umap.OwnedPage, umap.OwnedRow, page, _free.TryGetValue(page, out int free) ? free : 0);
         }
     }
 
@@ -353,9 +387,10 @@ internal sealed class LvalFree
     /// <paramref name="lvalRow"/>) as deleted and tail-compacts each page.
     /// <paramref name="chained"/> selects OTHER_PAGES chain walking
     /// ([nextRow:1][nextPage:3] prefix, nextPage == 0 ends) vs a single
-    /// OTHER_PAGE chunk.
+    /// OTHER_PAGE chunk. A page left with more room is noted in <see cref="PageFile.FreedLvalPages"/> for the column
+    /// whose usage maps <paramref name="owner"/> names, when it has them.
     /// </summary>
-    public void FreeChain(int lvalPage, int lvalRow, bool chained)
+    public void FreeChain(int lvalPage, int lvalRow, bool chained, LvalUmapRef? owner)
     {
         int curPage = lvalPage;
         int curRow  = lvalRow;
@@ -389,8 +424,9 @@ internal sealed class LvalFree
             TrimDeletedTail(page);
 
             _file.WritePage(curPage, page);
-            if (ByteUtil.GetShort(page, JetFormat.OffsetDataFreeSpace) > freeBefore)
-                _file.FreedLvalPages.Add(curPage);
+            short freeAfter = ByteUtil.GetShort(page, JetFormat.OffsetDataFreeSpace);
+            if (owner is { } column && freeAfter > freeBefore)
+                _file.FreedLvalPages.Set(column.OwnedPage, column.OwnedRow, curPage, freeAfter);
 
             if (!hasNext) break;
             curPage = nextPage;
