@@ -43,8 +43,6 @@ public sealed class TableDefinition
     // ── Primary-key index (optional) ─────────────────────────────────────────
     /// <summary>Page number of the primary key index's root page (0 if no primary key index).</summary>
     public int     PrimaryKeyIndexPage   { get; set; }
-    /// <summary>The primary key's block among the TDEF's index blocks: 0 for a table this library makes.</summary>
-    internal int   PrimaryKeyIndexDataNumber { get; set; }
     /// <summary>
     /// The usage map listing the primary key's index pages: its page (0 when there
     /// is none) and row. A table this library makes keeps it on its own usage-map
@@ -235,9 +233,11 @@ public sealed class TableDefinition
             ByteUtil.PutShort(page, pos, col.DataType.IsVariableLength() ? varIndexes[col] : (short)0); pos += 2;
             ByteUtil.PutShort(page, pos, (short)col.ColumnNumber); pos += 2;
 
-            if (col.DataType == DataType.Text)
+            if (col.DataType is DataType.Text or DataType.Memo)
             {
-                for (int i = 0; i < format.SizeSortOrder; i++) page[pos++] = 0x00;
+                // The order the column sorts in: Access keys a column with none in an order of its own.
+                col.SortOrder.Write(page, pos, format);
+                pos += format.SizeSortOrder;
             }
             else
             {

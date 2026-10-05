@@ -441,9 +441,8 @@ public sealed class Database : IDisposable
     /// <param name="name">Table name (must be unique in the database).</param>
     /// <param name="columns">Column definitions (use <see cref="ColumnBuilder"/>).</param>
     /// <param name="primaryKey">
-    ///   Optional name of the primary-key column.  A structurally valid but
-    ///   empty index leaf page is created; B-tree maintenance on insert is not
-    ///   yet implemented.
+    ///   Optional name of the primary-key column. Its index is kept as rows are
+    ///   inserted, deleted and updated.
     /// </param>
     public Table CreateTable(string name, IReadOnlyList<Column> columns, string? primaryKey = null)
         => CreateTableCore(name, columns, primaryKey is null ? null : new[] { primaryKey });
@@ -472,20 +471,20 @@ public sealed class Database : IDisposable
 
         var format = _file.Format;
 
-        if (_catalog.FindTableTdefPage(name) >= 0)
-            throw new InvalidOperationException($"A table named '{name}' already exists in this database.");
+        // Everything that can refuse the table does so before a page is added.
         if (pkColumns is { Count: > 0 })
         {
             foreach (string pk in pkColumns)
             {
                 var pkColumn = columns.FirstOrDefault(c => string.Equals(c.Name, pk, StringComparison.OrdinalIgnoreCase))
                     ?? throw new InvalidOperationException($"Primary key column '{pk}' not found in table '{name}'.");
-                if (!IndexKeys.CanEncode(pkColumn.DataType))
+                if (!IndexKeys.CanEncode(pkColumn))
                     throw new NotSupportedException(
-                        $"A primary key on a {pkColumn.DataType} column ('{pk}') is not supported: " +
-                        "its index entries would not be the ones Access writes.");
+                        $"A primary key on '{pk}' is not supported: {IndexKeys.WhyNot(pkColumn)}, " +
+                        "so its index entries would not be the ones Access writes.");
             }
         }
+        _catalog.EnsureCanRegister(name);
 
         // 1. Allocate the TDEF page (content written in step 3).
         int tdefPage = _allocator.AllocatePage();
@@ -529,7 +528,6 @@ public sealed class Database : IDisposable
         {
             var idxWriter = new IndexWriter(_file, _allocator);
             tableDef.PrimaryKeyIndexPage      = idxWriter.CreatePrimaryKeyIndex(tableDef, pkColumns);
-            tableDef.PrimaryKeyIndexDataNumber = 0;
             tableDef.PrimaryKeyIndexUmapPage  = umapPage;
             tableDef.PrimaryKeyIndexUmapRow   = 2;
             UsageMap.AddPage(_file, _allocator, umapPage, 2, tableDef.PrimaryKeyIndexPage);
@@ -583,7 +581,6 @@ public sealed class Database : IDisposable
         if (pkIndex is not null && pkIndex.Columns.Count > 0)
         {
             tableDef.PrimaryKeyIndexPage       = pkIndex.RootPageNumber;
-            tableDef.PrimaryKeyIndexDataNumber = pkIndex.IndexDataNumber;
             tableDef.PrimaryKeyIndexUmapPage   = pkIndex.UsedPagesUmapPage;
             tableDef.PrimaryKeyIndexUmapRow    = pkIndex.UsedPagesUmapRow;
             if (pkIndex.Columns.Count == 1)

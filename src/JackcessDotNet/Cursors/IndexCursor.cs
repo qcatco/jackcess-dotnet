@@ -63,6 +63,7 @@ public sealed class IndexCursor : Cursor
             && _definition.PrimaryKeyIndexPage > 0
             && _definition.PrimaryKeyColumnName is not null
             && string.Equals(columnName, _definition.PrimaryKeyColumnName, StringComparison.OrdinalIgnoreCase)
+            && IndexWriter.PrimaryKeyColumns(_definition).All(c => IndexKeys.CanEncode(c.Column))
             && LeafIsUncompressed(_definition.PrimaryKeyIndexPage);
         if (path1Eligible)
         {
@@ -118,8 +119,9 @@ public sealed class IndexCursor : Cursor
     /// <summary>
     /// Picks a disk-resident index that's usable for a single-column lookup on
     /// <paramref name="columnName"/>: must have exactly one column, that column must
-    /// match by name, and the data type must be one IndexReader knows how to encode.
-    /// Returns false when no such index is present (caller falls back to scan).
+    /// match by name, and its keys must be ones IndexReader makes as Access made them
+    /// (a type it encodes; text sorted in General - Legacy). Returns false when no
+    /// such index is present (caller falls back to scan).
     /// </summary>
     private bool TryFindMatchingDiskIndex(string columnName, out Index? matched)
     {
@@ -129,8 +131,7 @@ public sealed class IndexCursor : Cursor
             if (ix.RootPageNumber <= 0) continue;
             if (!string.Equals(ix.Columns[0].Column.Name, columnName, StringComparison.OrdinalIgnoreCase))
                 continue;
-            var dt = ix.Columns[0].Column.DataType;
-            if (dt is DataType.Byte or DataType.Int or DataType.Long or DataType.Text)
+            if (IndexReader.CanResolve(ix.Columns[0].Column))
             {
                 matched = ix;
                 return true;

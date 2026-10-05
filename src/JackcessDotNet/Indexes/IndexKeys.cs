@@ -18,6 +18,19 @@ internal static class IndexKeys
     public static bool CanEncode(DataType type)
         => type is DataType.Byte or DataType.Int or DataType.Long or DataType.Text or DataType.Guid;
 
+    /// <summary>
+    /// True when <see cref="Encode"/> writes the keys Access writes for <paramref name="column"/>: a type it
+    /// encodes and, for text, a column that sorts in General - Legacy, the order of the text keys it writes.
+    /// </summary>
+    public static bool CanEncode(Column column)
+        => CanEncode(column.DataType) && (column.DataType != DataType.Text || column.SortOrder.IsGeneralLegacy);
+
+    /// <summary>Why <paramref name="column"/>'s keys cannot be written (<see cref="CanEncode(Column)"/> is false).</summary>
+    public static string WhyNot(Column column)
+        => CanEncode(column.DataType)
+            ? $"{column.Name} sorts in {column.SortOrder}, and this library writes text keys only in {SortOrder.GeneralLegacy}"
+            : $"{column.Name} is a {column.DataType} column, whose keys this library does not write";
+
     /// <summary>The key of an entry whose columns hold <paramref name="values"/>, in the index's column order.</summary>
     public static byte[] Encode(IReadOnlyList<IndexColumn> columns, IReadOnlyList<object?> values)
     {

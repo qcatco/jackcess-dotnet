@@ -60,6 +60,12 @@ public sealed class Column
     /// </summary>
     public bool IsCompressedUnicode { get; internal set; } = true;
 
+    /// <summary>
+    /// The order a Text or Memo column's values sort in, in its indexes, read from its TDEF. Columns this library
+    /// creates sort in General - Legacy, the order whose keys it writes.
+    /// </summary>
+    internal SortOrder SortOrder { get; set; } = SortOrder.GeneralLegacy;
+
     internal Column(
         string name,
         DataType dataType,

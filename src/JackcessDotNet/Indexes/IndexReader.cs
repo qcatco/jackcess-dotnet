@@ -50,13 +50,17 @@ internal sealed class IndexReader
     /// <summary>
     /// True when <see cref="FindRowPointers"/> can resolve a key for this index.
     /// Single- and multi-column indexes are supported; each column must be one
-    /// of the encodable types (Byte/Int/Long/Text).
+    /// of the encodable types (Byte/Int/Long/Text), and a Text column must sort in
+    /// General - Legacy, the order of the text keys this library makes: a key made
+    /// in one order is not found among keys sorted in another.
     /// </summary>
     public bool CanResolveKey
-        => _index.Columns.Count >= 1 && _index.Columns.All(c => IsSupportedKeyType(c.Column.DataType));
+        => _index.Columns.Count >= 1 && _index.Columns.All(c => CanResolve(c.Column));
 
-    private static bool IsSupportedKeyType(DataType dt)
-        => dt is DataType.Byte or DataType.Int or DataType.Long or DataType.Text;
+    /// <summary>True when a key on <paramref name="column"/> can be made as Access made the index's.</summary>
+    internal static bool CanResolve(Column column)
+        => column.DataType is DataType.Byte or DataType.Int or DataType.Long
+        || column.DataType == DataType.Text && column.SortOrder.IsGeneralLegacy;
 
     /// <summary>
     /// Walks the B-tree rooted at <see cref="Index.RootPageNumber"/> and yields the

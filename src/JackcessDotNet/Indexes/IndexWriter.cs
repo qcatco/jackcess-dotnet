@@ -21,12 +21,15 @@ namespace JackcessDotNet;
 /// Entries are written in full (a shared-prefix length of 0, which Access
 /// reads); a page Access wrote with a shared prefix is read and rewritten that
 /// way. A page that overflows splits in two and its parent gains an entry; a
-/// parent that overflows splits the same way, up to a new root, whose page is
-/// patched into the index's block in the TDEF.
+/// parent that overflows splits the same way. The root keeps its page, as
+/// Jackcess's does: when it splits, its entries move to two new pages beneath it
+/// and it becomes the node above them, and a root left with one child takes that
+/// child's entries back. So the TDEF's root, and every copy of it a reader or
+/// writer holds, stays right.
 ///
-/// Pages written by earlier versions of this library (an entry for every child
-/// and no tail, 0xFFFFFFFF for "no page") are read either way and brought to
-/// these rules when written.
+/// Pages written by earlier versions of this library (an entry for every child,
+/// each with row pointer 0, and no tail; 0xFFFFFFFF for "no page") are read either
+/// way and brought to these rules when the tree is changed.
 /// </summary>
 public sealed class IndexWriter
 {
@@ -92,8 +95,9 @@ public sealed class IndexWriter
     }
 
     /// <summary>
-    /// Adds a (key, row) entry to the table's primary key. May move the root, and
-    /// then updates <see cref="TableDefinition.PrimaryKeyIndexPage"/> and the TDEF.
+    /// Adds a (key, row) entry to the table's primary key. The root stays on its page
+    /// (see the class summary), so <see cref="TableDefinition.PrimaryKeyIndexPage"/> and
+    /// the TDEF stay right, for this table object and any other.
     /// </summary>
     public void InsertPrimaryKey(TableDefinition table, object primaryKeyValue, int rowPointer)
         => InsertPrimaryKey(table, new[] { primaryKeyValue }, rowPointer);
@@ -106,28 +110,28 @@ public sealed class IndexWriter
                 "Table has no primary key index page. " +
                 "Specify a primary key column name when calling Database.CreateTable.");
 
-        var target = new Target(table.TdefPageNumber, table.PrimaryKeyIndexDataNumber, table.PrimaryKeyIndexPage,
+        var target = new Target(table.TdefPageNumber, table.PrimaryKeyIndexPage,
                                 table.PrimaryKeyIndexUmapPage, table.PrimaryKeyIndexUmapRow);
         Insert(target, PrimaryKeyBytes(table, values), rowPointer);
-        table.PrimaryKeyIndexPage = target.RootPage;
     }
 
     /// <summary>
     /// Takes the entry for <paramref name="values"/> at <paramref name="rowPointer"/> out of the table's primary
-    /// key: a row deleted, or moved by an update. May move the root, as <see cref="InsertPrimaryKey(TableDefinition, IReadOnlyList{object?}, int)"/> may.
+    /// key: a row deleted, or moved by an update.
     /// </summary>
     internal void RemovePrimaryKey(TableDefinition table, IReadOnlyList<object?> values, int rowPointer)
     {
         if (table.PrimaryKeyIndexPage == 0) return;
-        var target = new Target(table.TdefPageNumber, table.PrimaryKeyIndexDataNumber, table.PrimaryKeyIndexPage,
+        var target = new Target(table.TdefPageNumber, table.PrimaryKeyIndexPage,
                                 table.PrimaryKeyIndexUmapPage, table.PrimaryKeyIndexUmapRow);
         Remove(target, PrimaryKeyBytes(table, values), rowPointer);
-        table.PrimaryKeyIndexPage = target.RootPage;
     }
 
-    // The primary key's columns: from the index on disk when the table was read,
-    // or from its definition (ascending) when this library made it.
-    private static IReadOnlyList<IndexColumn> PrimaryKeyColumns(TableDefinition table)
+    /// <summary>
+    /// The primary key's columns: from the index on disk when the table was read,
+    /// or from its definition (ascending) when this library made it.
+    /// </summary>
+    internal static IReadOnlyList<IndexColumn> PrimaryKeyColumns(TableDefinition table)
     {
         var pk = table.Indexes.FirstOrDefault(ix => ix.IsPrimaryKey);
         if (pk is not null && pk.Columns.Count > 0) return pk.Columns;
@@ -148,44 +152,42 @@ public sealed class IndexWriter
 
     // ── Any index ────────────────────────────────────────────────────────────
 
-    /// <summary>An index to add to: its TDEF and block there, its root, and its used-pages usage map.</summary>
+    /// <summary>An index to change: its table's TDEF page, its root page (which never moves), and its used-pages usage map.</summary>
     internal sealed class Target
     {
-        public Target(int tdefPage, int indexDataNumber, int rootPage, int umapPage, int umapRow)
+        public Target(int tdefPage, int rootPage, int umapPage, int umapRow)
         {
-            TdefPage        = tdefPage;
-            IndexDataNumber = indexDataNumber;
-            RootPage        = rootPage;
-            UmapPage        = umapPage;
-            UmapRow         = umapRow;
+            TdefPage = tdefPage;
+            RootPage = rootPage;
+            UmapPage = umapPage;
+            UmapRow  = umapRow;
         }
 
         public static Target For(int tdefPage, Index index)
-            => new(tdefPage, index.IndexDataNumber, index.RootPageNumber, index.UsedPagesUmapPage, index.UsedPagesUmapRow);
+            => new(tdefPage, index.RootPageNumber, index.UsedPagesUmapPage, index.UsedPagesUmapRow);
 
-        public int TdefPage        { get; }
-        public int IndexDataNumber { get; }
-        public int RootPage        { get; set; }
-        public int UmapPage        { get; }
-        public int UmapRow         { get; }
+        public int TdefPage { get; }
+        public int RootPage { get; }
+        public int UmapPage { get; }
+        public int UmapRow  { get; }
     }
 
     /// <summary>
     /// Adds the entry (<paramref name="key"/>, <paramref name="rowPointer"/>), splitting
-    /// pages up the tree as they fill. <see cref="Target.RootPage"/> holds the root after.
+    /// pages up the tree as they fill.
     /// </summary>
     internal void Insert(Target target, byte[] key, int rowPointer)
     {
         var entry = new Entry(key, rowPointer, 0);
         var path  = new List<(IndexPage Node, int Slot)>();   // Slot -1: the node's tail
 
-        var page = Read(target.RootPage);
+        var page = ReadFor(target, target.RootPage);
         while (!page.IsLeaf)
         {
-            UseTail(page);
+            UseTail(page, persist: true);
             int slot = FirstAtLeast(page.Entries, entry);
             path.Add((page, slot));
-            page = Read(slot >= 0 ? page.Entries[slot].SubPage : page.Tail);
+            page = ReadFor(target, slot >= 0 ? page.Entries[slot].SubPage : page.Tail);
         }
         InsertSorted(page.Entries, entry);
 
@@ -200,22 +202,13 @@ public sealed class IndexWriter
                 return;
             }
 
-            var (left, right, leftLast) = Split(child, target);
             if (depth == 0)
             {
-                var root = new IndexPage(_allocator.AllocatePage(), isLeaf: false, raw: null)
-                {
-                    Tdef  = target.TdefPage,
-                    Level = child.Level + 1,
-                    Tail  = right.Number,
-                };
-                root.Entries.Add(new Entry(leftLast.Key, leftLast.RowPtr, left.Number));
-                Write(root);
-                Own(target, root.Number);
-                target.RootPage = root.Number;
-                PatchTdefRoot(target);
+                SplitRoot(child, target);
                 return;
             }
+
+            var (left, right, leftLast) = Split(child, target);
 
             var (parent, parentSlot) = path[depth - 1];
             if (parentSlot >= 0)
@@ -248,13 +241,13 @@ public sealed class IndexWriter
         var entry = new Entry(key, rowPointer, 0);
         var path  = new List<(IndexPage Node, int Slot)>();   // Slot -1: the node's tail
 
-        var page = Read(target.RootPage);
+        var page = ReadFor(target, target.RootPage);
         while (!page.IsLeaf)
         {
-            UseTail(page);
+            UseTail(page, persist: true);
             int slot = FirstAtLeast(page.Entries, entry);
             path.Add((page, slot));
-            page = Read(slot >= 0 ? page.Entries[slot].SubPage : page.Tail);
+            page = ReadFor(target, slot >= 0 ? page.Entries[slot].SubPage : page.Tail);
         }
         int at = page.Entries.FindIndex(e => Compare(e, entry) == 0);
         if (at < 0) return;
@@ -294,16 +287,25 @@ public sealed class IndexWriter
 
         if (depth == 0 && !child.IsLeaf && child.Entries.Count == 0)
         {
-            // A root with one child gives way to it; a root with none is an empty leaf again.
+            // A root with one child takes that child's entries back, on its own page; a root
+            // with none is an empty leaf again.
             if (child.Tail > 0)
             {
-                Drop(child, target);
-                target.RootPage = child.Tail;
-                PatchTdefRoot(target);
+                var only = Read(child.Tail);
+                var root = new IndexPage(child.Number, only.IsLeaf, child.Raw)
+                {
+                    Tdef  = target.TdefPage,
+                    Level = only.Level,
+                    Tail  = only.Tail,
+                };
+                root.Entries.AddRange(only.Entries);
+                Write(root);
+                if (target.UmapPage > 0)
+                    UsageMap.RemovePage(_file, target.UmapPage, target.UmapRow, only.Number);
             }
             else
             {
-                Write(new IndexPage(child.Number, isLeaf: true, child.Raw) { Tdef = child.Tdef });
+                Write(new IndexPage(child.Number, isLeaf: true, child.Raw) { Tdef = target.TdefPage });
             }
             return;
         }
@@ -342,7 +344,7 @@ public sealed class IndexWriter
         var page  = Read(rootPage);
         while (!page.IsLeaf)
         {
-            UseTail(page);
+            UseTail(page, persist: false);
             int slot  = FirstAtLeast(page.Entries, first);
             int child = slot >= 0 ? page.Entries[slot].SubPage : page.Tail;
             if (child <= 0) yield break;
@@ -409,13 +411,98 @@ public sealed class IndexWriter
         return (page, right, leftLast);
     }
 
-    // A node written by an earlier version of this library has an entry for every
-    // child and no tail: its last child becomes the tail.
-    private static void UseTail(IndexPage node)
+    /// <summary>
+    /// Splits the root without moving it, as Jackcess does: its entries go to two new
+    /// pages beneath it, linked as its level's chain, and it becomes the node above them.
+    /// </summary>
+    private void SplitRoot(IndexPage root, Target target)
+    {
+        var left  = new IndexPage(_allocator.AllocatePage(), root.IsLeaf, raw: null) { Tdef = target.TdefPage, Level = root.Level };
+        var right = new IndexPage(_allocator.AllocatePage(), root.IsLeaf, raw: null) { Tdef = target.TdefPage, Level = root.Level };
+
+        Entry leftLast;
+        int mid = root.Entries.Count / 2;
+        if (root.IsLeaf)
+        {
+            left.Entries.AddRange(root.Entries.Take(mid));
+            right.Entries.AddRange(root.Entries.Skip(mid));
+            leftLast = left.Entries[^1];
+        }
+        else
+        {
+            if (root.Entries.Count < 3)
+                throw new InvalidDataException($"Index page {root.Number} is full with {root.Entries.Count} entries.");
+            leftLast   = root.Entries[mid];
+            left.Entries.AddRange(root.Entries.Take(mid));
+            left.Tail  = leftLast.SubPage;
+            right.Entries.AddRange(root.Entries.Skip(mid + 1));
+            right.Tail = root.Tail;
+        }
+        left.Next  = right.Number;
+        right.Prev = left.Number;
+        Write(left);
+        Write(right);
+        Own(target, left.Number);
+        Own(target, right.Number);
+
+        var node = new IndexPage(root.Number, isLeaf: false, root.Raw)
+        {
+            Tdef  = target.TdefPage,
+            Level = root.Level + 1,
+            Tail  = right.Number,
+        };
+        node.Entries.Add(new Entry(leftLast.Key, leftLast.RowPtr, left.Number));
+        Write(node);
+    }
+
+    /// <summary>
+    /// A node written by an earlier version of this library has an entry for every
+    /// child, each with row pointer 0, and no tail: its last child becomes the tail.
+    /// When the tree is being changed (<paramref name="persist"/>), each entry also
+    /// takes the row of the last entry under its child, so entries compare as Access's
+    /// do, and the node is written back. A search for a key's first entry (row 0)
+    /// goes to the same child either way, so a search reads no more.
+    /// </summary>
+    private void UseTail(IndexPage node, bool persist)
     {
         if (node.Tail > 0 || node.Entries.Count == 0) return;
         node.Tail = node.Entries[^1].SubPage;
         node.Entries.RemoveAt(node.Entries.Count - 1);
+        if (!persist) return;
+        for (int i = 0; i < node.Entries.Count; i++)
+        {
+            if (LastEntryUnder(node.Entries[i].SubPage) is { } last)
+                node.Entries[i] = new Entry(last.Key, last.RowPtr, node.Entries[i].SubPage);
+        }
+        node.Level = HeightOf(node);
+        Write(node);
+    }
+
+    // The last entry in the subtree under a page: down its tails (or last entries) to a leaf.
+    private Entry? LastEntryUnder(int pageNumber)
+    {
+        var page = Read(pageNumber);
+        while (!page.IsLeaf)
+        {
+            int next = page.Tail > 0 ? page.Tail : page.Entries.Count > 0 ? page.Entries[^1].SubPage : 0;
+            if (next <= 0) return null;
+            page = Read(next);
+        }
+        return page.Entries.Count > 0 ? page.Entries[^1] : null;
+    }
+
+    // A page's height above the leaves, found by walking down its last children.
+    private int HeightOf(IndexPage page)
+    {
+        int height = 0;
+        while (!page.IsLeaf)
+        {
+            int next = page.Tail > 0 ? page.Tail : page.Entries.Count > 0 ? page.Entries[^1].SubPage : 0;
+            if (next <= 0) break;
+            page = Read(next);
+            height++;
+        }
+        return height;
     }
 
     private void Own(Target target, int pageNumber)
@@ -429,37 +516,6 @@ public sealed class IndexWriter
         byte[] raw = _file.ReadPage(pageNumber);
         ByteUtil.PutInt(raw, offset, value);
         _file.WritePage(pageNumber, raw);
-    }
-
-    /// <summary>
-    /// Records a new root in the index's block in the TDEF. The block's place:
-    /// the header, the real indexes' row-count blocks, the column definitions and
-    /// names, then <see cref="Target.IndexDataNumber"/> blocks before it.
-    /// </summary>
-    private void PatchTdefRoot(Target target)
-    {
-        byte[] page = _file.ReadPage(target.TdefPage);
-
-        int numIndexes = ByteUtil.GetInt(page, _format.TdefOffsetNumIndexes);
-        int numCols    = ByteUtil.GetShort(page, _format.TdefOffsetNumCols);
-        if (target.IndexDataNumber < 0 || target.IndexDataNumber >= numIndexes)
-            throw new InvalidDataException(
-                $"The TDEF on page {target.TdefPage} has {numIndexes} indexes; index {target.IndexDataNumber} is not one.");
-
-        int pos = _format.SizeTdefHeader + numIndexes * _format.SizeIndexDefinition + numCols * _format.SizeColumnHeader;
-        for (int i = 0; i < numCols; i++)
-        {
-            int nameLen = _format.SizeNameLength == 2 ? ByteUtil.GetShort(page, pos) : page[pos];
-            pos += _format.SizeNameLength + nameLen;
-        }
-
-        // Root page: after the block's lead-in, 10 × 3-byte column entries and the 4-byte usage-map ref.
-        int rootField = pos + target.IndexDataNumber * _format.SizeIndexColumnBlock + _format.SkipBeforeIndex + 30 + 4;
-        if (rootField + 4 > page.Length)
-            throw new NotSupportedException(
-                $"The index block of the TDEF on page {target.TdefPage} is on its continuation page, which is not written.");
-        ByteUtil.PutInt(page, rootField, target.RootPage);
-        _file.WritePage(target.TdefPage, page);
     }
 
     // ── Pages ────────────────────────────────────────────────────────────────
@@ -552,6 +608,14 @@ public sealed class IndexWriter
     }
 
     private static int Link(int value) => value == OldNoPage ? 0 : value;
+
+    // A page of the index being changed: it names the index's table, as Access's pages do.
+    private IndexPage ReadFor(Target target, int number)
+    {
+        var page = Read(number);
+        page.Tdef = target.TdefPage;
+        return page;
+    }
 
     private int Size(IndexPage page) => page.Entries.Sum(e => e.Key.Length) +
         page.Entries.Count * (page.IsLeaf ? LeafTrailerLen : NodeTrailerLen);

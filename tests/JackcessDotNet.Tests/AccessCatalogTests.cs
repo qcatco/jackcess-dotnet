@@ -49,7 +49,9 @@ public sealed class AccessCatalogTests : IDisposable
         new object[] { "V2003", "delV2003.mdb" },
         new object[] { "V2003", "indexCodesV2003.mdb" },
         new object[] { "V2007", "common1V2007.accdb" },
-        new object[] { "V2010", "indexV2010.accdb" },
+        // An Access 2010 file whose catalog sorts names in General - Legacy: one in Access 2010's General order is
+        // refused (EngineReviewTests).
+        new object[] { "V2010", "calcFieldV2010.accdb" },
     };
 
     private static int TdefOf(PageFile file, string table)

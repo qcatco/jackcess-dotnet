@@ -100,7 +100,9 @@ public sealed class ReviewFindingsTests : IDisposable
         if (source is null) return;   // the corpus is optional locally; CI always has it
         File.Copy(source, _path);
         using var db = Database.Open(_path);
-        var table = db.ListTables().Select(db.GetTable).First(t => t.Columns.Any(c => c.DataType == DataType.Text));
+        // A table without a primary key: the engine writes no Access 97 text key, so it refuses rows for one with a key.
+        var table = db.ListTables().Select(db.GetTable)
+            .First(t => t.Columns.Any(c => c.DataType == DataType.Text) && !t.Indexes.Any(ix => ix.IsPrimaryKey));
         var col = table.Columns.First(c => c.DataType == DataType.Text);
 
         table.Insert(new Row { [col.Name] = new string('x', col.Length) });

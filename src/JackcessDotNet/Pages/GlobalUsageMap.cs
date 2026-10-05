@@ -13,6 +13,10 @@ namespace JackcessDotNet;
 /// about to add), so when a page is appended outside the window the map becomes
 /// a reference map, as Access's do for larger files: its map pages start with
 /// every page free, and every page up to the one appended is marked used.
+///
+/// The header and the map's pages are read once and kept (PageFile.ReadKeptPage):
+/// a page is appended for every page of rows, and reading them again for each
+/// doubled the reads an export made.
 /// </summary>
 internal static class GlobalUsageMap
 {
@@ -28,7 +32,7 @@ internal static class GlobalUsageMap
         var format = file.Format;
         if (file.PageCount <= MapPageNumber || !IsDatabase(file)) return;
 
-        byte[] page = file.ReadPage(MapPageNumber);
+        byte[] page = file.ReadKeptPage(MapPageNumber);
         if (page[0] != JetFormat.PageTypeData || ByteUtil.GetShort(page, format.OffsetDataNumRows) <= MapRow)
             return;   // no global map to keep
         int rowStart = UsageMap.GetRowStart(page, MapRow, format);
@@ -113,7 +117,7 @@ internal static class GlobalUsageMap
                 int number = index < pointers ? ByteUtil.GetInt(mapRowPage, rowStart + 1 + index * 4) : 0;
                 if (number > 0)
                 {
-                    map = (number, file.ReadPage(number));
+                    map = (number, file.ReadKeptPage(number));
                     if (map.Bytes[0] != JetFormat.PageTypeUsageMap)
                         throw new InvalidDataException($"The global usage map's page {number} is not a usage-map page.");
                 }
@@ -162,7 +166,7 @@ internal static class GlobalUsageMap
     // file (as some tests build) has no global map to keep.
     private static bool IsDatabase(PageFile file)
     {
-        byte[] header = file.ReadPage(0);
+        byte[] header = file.ReadKeptPage(0);
         const string signature = "Standard ";
         for (int i = 0; i < signature.Length; i++)
             if (header[4 + i] != (byte)signature[i]) return false;

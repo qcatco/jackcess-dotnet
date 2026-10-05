@@ -67,28 +67,22 @@ public sealed class SystemCatalog
     }
 
     /// <summary>
+    /// Refuses, before anything is written, a table this library cannot register as
+    /// Access would: a name an object in the Tables container already has, in any
+    /// case (a table, a query or a linked table: they share one set of names), or a
+    /// catalog with an index whose keys it cannot write (names sorted in an order
+    /// other than General - Legacy, as Access 2010 and later make them).
+    /// </summary>
+    public void EnsureCanRegister(string tableName) => Prepare(tableName);
+
+    /// <summary>
     /// Registers a new user table: its MSysObjects row and index entries, and its
-    /// permissions in MSysACEs (see the class summary).
+    /// permissions in MSysACEs (see the class summary). Refuses what
+    /// <see cref="EnsureCanRegister"/> refuses, before writing anything.
     /// </summary>
     public void InsertTableEntry(string tableName, int tdefPageNumber)
     {
-        var catalogDef = BuildCatalogTableDef();
-        var catalog    = ReadRows(catalogDef, ColId, ColName, ColType, ColParentId, ColOwner);
-
-        var tables = catalog.FirstOrDefault(r =>
-                Value(r, ColType) is short type && type == CatalogTypeContainer
-                && Value(r, ColParentId) is int parent && parent == DatabaseParentId
-                && Value(r, ColName) is string name && name == "Tables")
-            ?? throw new InvalidDataException("MSysObjects has no Tables container to put a table in.");
-        int tablesId = (int)Value(tables, ColId)!;
-        byte[]? owner = AdminOwner(catalog);
-
-        int acesTdef = FindTableTdefPage("MSysACEs");
-        var acesDef  = acesTdef >= 0 ? BuildTableDef("MSysACEs", acesTdef) : null;
-
-        // Every index must be one this library can write a key for, before anything is written.
-        EnsureKeysCanBeWritten(catalogDef);
-        if (acesDef is not null) EnsureKeysCanBeWritten(acesDef);
+        var (catalogDef, tablesId, owner, acesDef) = Prepare(tableName);
 
         var now = DateTime.Now;
         var row = new Row
@@ -162,13 +156,41 @@ public sealed class SystemCatalog
 
     private static object? Value(Row row, string column) => row.TryGetValue(column, out var value) ? value : null;
 
+    // What registering a table needs, read and checked before anything is written.
+    private (TableDefinition Catalog, int TablesId, byte[]? Owner, TableDefinition? Aces) Prepare(string tableName)
+    {
+        var catalogDef = BuildCatalogTableDef();
+        var catalog    = ReadRows(catalogDef, ColId, ColName, ColType, ColParentId, ColOwner);
+
+        var tables = catalog.FirstOrDefault(r =>
+                Value(r, ColType) is short type && type == CatalogTypeContainer
+                && Value(r, ColParentId) is int parent && parent == DatabaseParentId
+                && Value(r, ColName) is string name && name == "Tables")
+            ?? throw new InvalidDataException("MSysObjects has no Tables container to put a table in.");
+        int tablesId = (int)Value(tables, ColId)!;
+
+        if (catalog.Any(r => Value(r, ColParentId) is int parent && parent == tablesId
+                          && Value(r, ColName) is string name
+                          && string.Equals(name, tableName, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException($"An object named '{tableName}' already exists in this database.");
+
+        int acesTdef = FindTableTdefPage("MSysACEs");
+        var acesDef  = acesTdef >= 0 ? BuildTableDef("MSysACEs", acesTdef) : null;
+
+        // Every index must be one this library can write a key for.
+        EnsureKeysCanBeWritten(catalogDef);
+        if (acesDef is not null) EnsureKeysCanBeWritten(acesDef);
+
+        return (catalogDef, tablesId, AdminOwner(catalog), acesDef);
+    }
+
     private static void EnsureKeysCanBeWritten(TableDefinition def)
     {
         foreach (var index in def.Indexes)
             foreach (var column in index.Columns)
-                if (!IndexKeys.CanEncode(column.Column.DataType))
+                if (!IndexKeys.CanEncode(column.Column))
                     throw new NotSupportedException(
-                        $"{def.Name}'s index {index.Name} is on a {column.Column.DataType} column; its entries cannot be written.");
+                        $"{def.Name}'s index {index.Name} cannot be kept: {IndexKeys.WhyNot(column.Column)}.");
     }
 
     /// <summary>

@@ -44,6 +44,8 @@ public sealed class JetFormat
     // ── Per-column-header field byte-offsets (within one SizeColumnHeader block) ──
     public int OffsetColumnNumber          { get; }
     public int OffsetColumnPrecision       { get; }
+    /// <summary>A Text or Memo column's sort order (<see cref="SizeSortOrder"/> bytes).</summary>
+    public int OffsetColumnSortOrder       { get; }
     public int OffsetColumnScale           { get; }
     public int OffsetColumnFlags           { get; }
     public int OffsetColumnLength          { get; }
@@ -134,7 +136,7 @@ public sealed class JetFormat
         int TdefOffsetOwnedRow, int TdefOffsetOwnedPage,
         int TdefOffsetFreeRow, int TdefOffsetFreePage,
         // Column-header offsets
-        int OffsetColumnNumber, int OffsetColumnPrecision, int OffsetColumnScale,
+        int OffsetColumnNumber, int OffsetColumnSortOrder, int OffsetColumnPrecision, int OffsetColumnScale,
         int OffsetColumnFlags, int OffsetColumnLength,
         int OffsetColumnVarTableIndex, int OffsetColumnFixedDataOffset,
         // Index padding
@@ -173,6 +175,7 @@ public sealed class JetFormat
         TdefOffsetFreeRow           = s.TdefOffsetFreeRow;
         TdefOffsetFreePage          = s.TdefOffsetFreePage;
         OffsetColumnNumber          = s.OffsetColumnNumber;
+        OffsetColumnSortOrder       = s.OffsetColumnSortOrder;
         OffsetColumnPrecision       = s.OffsetColumnPrecision;
         OffsetColumnScale           = s.OffsetColumnScale;
         OffsetColumnFlags           = s.OffsetColumnFlags;
@@ -219,6 +222,7 @@ public sealed class JetFormat
         TdefOffsetFreeRow:     39,
         TdefOffsetFreePage:    40,
         OffsetColumnNumber:    1,
+        OffsetColumnSortOrder: 9,
         OffsetColumnPrecision: 11,
         OffsetColumnScale:     12,
         OffsetColumnFlags:     13,
@@ -268,6 +272,7 @@ public sealed class JetFormat
         TdefOffsetFreeRow:     59,
         TdefOffsetFreePage:    60,
         OffsetColumnNumber:    5,
+        OffsetColumnSortOrder: 11,
         OffsetColumnPrecision: 11,
         OffsetColumnScale:     12,
         OffsetColumnFlags:     15,

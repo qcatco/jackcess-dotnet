@@ -77,6 +77,7 @@ public sealed class Table
     public void Insert(Row row)
     {
         if (row is null) throw new ArgumentNullException(nameof(row));
+        EnsurePrimaryKeyCanBeKept();
 
         _owningDb?.ValidateForeignKeysForInsert(this, row);
 
@@ -104,6 +105,7 @@ public sealed class Table
     /// </summary>
     public void UpdateByPrimaryKey(object primaryKeyValue, Row newValues)
     {
+        EnsurePrimaryKeyCanBeKept();
         var (oldRowPtr, newRowPtr) = _dataWriter.UpdateRowByPrimaryKeyMoving(_definition, primaryKeyValue, newValues);
 
         // The merged row that was actually written carries the (unchanged) PK value, so we can
@@ -114,6 +116,21 @@ public sealed class Table
             writer.RemovePrimaryKey(_definition, new[] { primaryKeyValue }, oldRowPtr);
             writer.InsertPrimaryKey(_definition, primaryKeyValue, newRowPtr);
         }
+    }
+
+    /// <summary>
+    /// Refuses, before anything changes, to change a table whose primary key this
+    /// library cannot keep: a key on a column whose entries it cannot write as Access
+    /// writes them. A row changed with its key left behind is one Access counts and
+    /// finds wrongly.
+    /// </summary>
+    private void EnsurePrimaryKeyCanBeKept()
+    {
+        if (_definition.PrimaryKeyIndexPage == 0) return;
+        foreach (var column in IndexWriter.PrimaryKeyColumns(_definition))
+            if (!IndexKeys.CanEncode(column.Column))
+                throw new NotSupportedException(
+                    $"{Name}'s primary key cannot be kept: {IndexKeys.WhyNot(column.Column)}. The table is left as it was.");
     }
 
     private void MaybeAddPrimaryKeyIndexEntry(Row row, int rowPtr)
@@ -151,6 +168,7 @@ public sealed class Table
     /// </summary>
     public void DeleteRow(string columnName, object value)
     {
+        EnsurePrimaryKeyCanBeKept();
         var deleted = _dataWriter.DeleteFirstMatch(_definition, columnName, value);
         _dataWriter.IncrementTdefRowCount(_definition.TdefPageNumber, -1);
 
