@@ -44,7 +44,7 @@ public sealed class RowEncoder
         if (row is null)
             throw new ArgumentNullException(nameof(row));
 
-        RefuseTextLongerThanItsColumn(row);
+        Validate(row);
 
         int maxRowSize = _format.MaxRowSize;
         var buffer = new byte[maxRowSize];
@@ -231,9 +231,10 @@ public sealed class RowEncoder
     /// <summary>
     /// Throws when a Text value is longer than its column allows, as Access does, before anything of the row is
     /// written. Written whole, ACE reads such a value cut to the column's length and a typed reader refuses the table.
-    /// A Jet4 Text column's length is in bytes, two to a character; a Jet3 one's is in characters.
+    /// A Jet4 Text column's length is in bytes, two to a character; a Jet3 one's is in characters. An update calls it
+    /// before it deletes the row it replaces.
     /// </summary>
-    private void RefuseTextLongerThanItsColumn(Row row)
+    internal void Validate(Row row)
     {
         foreach (var col in _columns)
         {
@@ -243,8 +244,7 @@ public sealed class RowEncoder
             int maxChars = _format.Version == JetVersion.Jet3 ? col.Length : col.Length / 2;
             string text = Convert.ToString(value) ?? string.Empty;
             if (text.Length > maxChars)
-                throw new ArgumentException(
-                    $"Column '{col.Name}' holds at most {maxChars} characters; the value has {text.Length}.");
+                throw new ColumnValueTooLongException(col.Name, maxChars, text.Length);
         }
     }
 

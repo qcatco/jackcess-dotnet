@@ -8,7 +8,7 @@ namespace JackcessDotNet;
 /// A row comes in one of two forms, as in Access and Java Jackcess (UsageMap.InlineHandler and ReferenceHandler):
 ///   inline     Byte 0 = 0x00, bytes 1-4 = start page (int, LE), then a bitmap, 1 bit per page from the start
 ///              page. It covers one window of (row length - 5) x 8 pages: 512 in Access's own 69-byte rows,
-///              1,600 in this engine's.
+///              1,600 in this engine's Jet4 rows and 800 in its Jet3 ones.
 ///   reference  Byte 0 = 0x01, then 4-byte LE page numbers of usage-map pages (type 0x05), the i-th covering pages
 ///              i x N .. (i + 1) x N - 1 with N = (page size - 4) x 8, its bitmap from byte 4; 0 where none is
 ///              needed yet. 17 pointers in a 69-byte row reach past Jet's 2 GB.

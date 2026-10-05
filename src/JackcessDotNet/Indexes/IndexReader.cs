@@ -60,7 +60,7 @@ internal sealed class IndexReader
 
     /// <summary>
     /// Walks the B-tree rooted at <see cref="Index.RootPageNumber"/> and yields the
-    /// packed rowPtr (pageNumber &lt;&lt; 16 | rowIndex) for every leaf entry whose
+    /// <see cref="RowPointer"/> for every leaf entry whose
     /// key bytes equal those of <paramref name="key"/>. Single-column shortcut.
     /// </summary>
     public IEnumerable<int> FindRowPointers(object key)
@@ -114,7 +114,7 @@ internal sealed class IndexReader
             {
                 int cmp = CompareBytes(entry.KeyBytes, searchKey);
                 if (cmp == 0)
-                    yield return ((entry.RowPage & 0xFFFFFF) << 16) | (entry.RowIndex & 0xFF);
+                    yield return RowPointer.Pack(entry.RowPage & RowPointer.MaxPage, entry.RowIndex & 0xFF);
                 else if (cmp > 0)
                     yield break;   // entries are sorted ASC — no further matches possible
             }

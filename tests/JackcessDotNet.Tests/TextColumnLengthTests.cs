@@ -28,13 +28,30 @@ public sealed class TextColumnLengthTests : IDisposable
         });
         table.Insert(new Row { ["Id"] = 1, ["Date"] = "14-Sep-2026" });
 
-        var ex = Assert.Throws<ArgumentException>(() => table.Insert(new Row { ["Id"] = 2, ["Date"] = "14-Sept-2026" }));
+        var ex = Assert.Throws<ColumnValueTooLongException>(() => table.Insert(new Row { ["Id"] = 2, ["Date"] = "14-Sept-2026" }));
 
+        Assert.Equal("Date", ex.Column);
+        Assert.Equal(11, ex.MaxLength);
+        Assert.Equal(12, ex.Length);
         Assert.Contains("Date", ex.Message);
-        Assert.Contains("11", ex.Message);
         var rows = table.ReadAllRows();
         Assert.Single(rows);
         Assert.Equal("14-Sep-2026", rows[0]["Date"]);
+    }
+
+    [Fact]
+    public void A_row_is_checked_against_its_columns_without_being_written()
+    {
+        // What a caller checks a whole batch of rows with before it writes any, so that a refused value stops the
+        // batch before the file holds half of it.
+        using var db = Database.Create(_path, JetVersion.Jet4);
+        var table = db.CreateTable("Dates", new[] { new ColumnBuilder("Date", DataType.Text).MaxLength(11).Build() });
+
+        table.Validate(new Row { ["Date"] = "14-Sep-2026" });
+        var ex = Assert.Throws<ColumnValueTooLongException>(() => table.Validate(new Row { ["Date"] = "14-Sept-2026" }));
+
+        Assert.Equal("Date", ex.Column);
+        Assert.Empty(table.ReadAllRows());
     }
 
     [Fact]

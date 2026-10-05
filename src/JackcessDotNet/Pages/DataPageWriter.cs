@@ -68,7 +68,7 @@ public sealed class DataPageWriter
         int dataPage   = FindOrAllocateDataPage(tableDef, rowData.Length, format);
         int rowNum     = WriteRowOnPage(dataPage, rowData, tableDef.TdefPageNumber, format);
 
-        return (dataPage << 16) | rowNum;
+        return RowPointer.Pack(dataPage, rowNum);
     }
 
     /// <summary>
@@ -158,7 +158,7 @@ public sealed class DataPageWriter
     /// Finds the row whose primary-key column equals <paramref name="primaryKeyValue"/>
     /// (linear scan of all owned data pages), merges <paramref name="newValues"/> into it,
     /// marks the old row as deleted, and re-inserts the merged row.
-    /// Returns the packed rowPtr of the new row: <c>pageNumber &lt;&lt; 16 | rowIndex</c>.
+    /// Returns the new row's <see cref="RowPointer"/>.
     /// </summary>
     public int UpdateRowByPrimaryKey(TableDefinition table, object primaryKeyValue, Row newValues)
     {
@@ -231,6 +231,10 @@ public sealed class DataPageWriter
                 }
                 foreach (var kvp in newValues)
                     merged[kvp.Key] = kvp.Value;
+
+                // A merged row the new one could not be written as - text longer than its column - must not cost
+                // the row it replaces, so it is checked before anything is freed or deleted.
+                new RowEncoder(format, columns).Validate(merged);
 
                 // Free any LVAL chains referenced by the old row before overwriting.
                 FreeRowLvalChains(rowBytes, decoder);

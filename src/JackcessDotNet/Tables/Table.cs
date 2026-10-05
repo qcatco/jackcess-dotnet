@@ -86,6 +86,18 @@ public sealed class Table
     }
 
     /// <summary>
+    /// Checks <paramref name="row"/> against the table's columns without writing it: throws
+    /// <see cref="ColumnValueTooLongException"/> for a Text value longer than its column, as <see cref="Insert"/>
+    /// would. A caller writing many rows can check them all first, so a refused value stops the batch before any of
+    /// it is in the file.
+    /// </summary>
+    public void Validate(Row row)
+    {
+        if (row is null) throw new ArgumentNullException(nameof(row));
+        new RowEncoder(_file.Format, _definition.Columns).Validate(row);
+    }
+
+    /// <summary>
     /// Updates the row with the given primary-key value.
     /// Old LVAL chunks are freed and their space is reclaimed before the new row is written.
     /// A new PK index entry is appended pointing at the rewritten row; the old entry is left

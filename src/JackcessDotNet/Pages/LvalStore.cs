@@ -89,7 +89,12 @@ internal sealed class LvalWriter
             chunk[2] = (byte)(nextPage >> 8);
             chunk[3] = (byte)(nextPage >> 16);
             Array.Copy(data, start, chunk, 4, len);
-            WriteChunkRowOnPage(placements[i].page, chunk);
+            // Each chunk names the next by the row it was planned to take: a chunk landing elsewhere would leave the
+            // chain pointing at the wrong row, so that is an error, not a value read back wrong later.
+            int row = WriteChunkRowOnPage(placements[i].page, chunk);
+            if (row != placements[i].row)
+                throw new InvalidOperationException(
+                    $"LVAL chunk {i} took row {row} of page {placements[i].page}, not the row {placements[i].row} its chain names.");
         }
         picker.Done();
         return BuildLvRef(totalLen, LvalTypeOtherPages, placements[0].page, placements[0].row);
@@ -130,6 +135,10 @@ internal sealed class LvalWriter
         private void Consider(int page)
         {
             byte[] dp = _writer._file.ReadPage(page);
+            // Only a long-value page: type 0x01 with "LVAL" at bytes 4-7, as AllocateLvalPage writes one. A map that
+            // lists any other page last - another table's data page - must not have chunks written onto it.
+            if (dp[0] != JetFormat.PageTypeData || dp[4] != (byte)'L' || dp[5] != (byte)'V' || dp[6] != (byte)'A' || dp[7] != (byte)'L')
+                return;
             _pages.Add(page);
             _free[page] = ByteUtil.GetShort(dp, JetFormat.OffsetDataFreeSpace);
             _rows[page] = ByteUtil.GetShort(dp, _writer._format.OffsetDataNumRows);
