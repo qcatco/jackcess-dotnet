@@ -472,11 +472,28 @@ public sealed class Database : IDisposable
 
         var format = _file.Format;
 
+        if (_catalog.FindTableTdefPage(name) >= 0)
+            throw new InvalidOperationException($"A table named '{name}' already exists in this database.");
+        if (pkColumns is { Count: > 0 })
+        {
+            foreach (string pk in pkColumns)
+            {
+                var pkColumn = columns.FirstOrDefault(c => string.Equals(c.Name, pk, StringComparison.OrdinalIgnoreCase))
+                    ?? throw new InvalidOperationException($"Primary key column '{pk}' not found in table '{name}'.");
+                if (!IndexKeys.CanEncode(pkColumn.DataType))
+                    throw new NotSupportedException(
+                        $"A primary key on a {pkColumn.DataType} column ('{pk}') is not supported: " +
+                        "its index entries would not be the ones Access writes.");
+            }
+        }
+
         // 1. Allocate the TDEF page (content written in step 3).
         int tdefPage = _allocator.AllocatePage();
 
-        // 2. Allocate the usage-map page (owned pages + free-space maps).
-        int umapPage = _allocator.AllocateUmapPage();
+        // 2. Allocate the usage-map page: owned pages, free space, and with a primary
+        //    key a third map for the key's index pages, where Access keeps it.
+        bool hasPk = pkColumns is { Count: > 0 };
+        int umapPage = _allocator.AllocateUmapPage(hasPk ? 3 : 2);
 
         // 3. Allocate a LVAL usage-map page for each Memo/OLE column (must happen before
         //    Serialize so the page numbers can be embedded in the TDEF).
@@ -511,7 +528,11 @@ public sealed class Database : IDisposable
         if (pkColumns is { Count: > 0 })
         {
             var idxWriter = new IndexWriter(_file, _allocator);
-            tableDef.PrimaryKeyIndexPage = idxWriter.CreatePrimaryKeyIndex(tableDef, pkColumns);
+            tableDef.PrimaryKeyIndexPage      = idxWriter.CreatePrimaryKeyIndex(tableDef, pkColumns);
+            tableDef.PrimaryKeyIndexDataNumber = 0;
+            tableDef.PrimaryKeyIndexUmapPage  = umapPage;
+            tableDef.PrimaryKeyIndexUmapRow   = 2;
+            UsageMap.AddPage(_file, _allocator, umapPage, 2, tableDef.PrimaryKeyIndexPage);
             if (pkColumns.Count == 1)
                 tableDef.PrimaryKeyColumnName = pkColumns[0];
             else
@@ -561,7 +582,10 @@ public sealed class Database : IDisposable
         var pkIndex = info.Indexes.FirstOrDefault(ix => ix.IsPrimaryKey);
         if (pkIndex is not null && pkIndex.Columns.Count > 0)
         {
-            tableDef.PrimaryKeyIndexPage = pkIndex.RootPageNumber;
+            tableDef.PrimaryKeyIndexPage       = pkIndex.RootPageNumber;
+            tableDef.PrimaryKeyIndexDataNumber = pkIndex.IndexDataNumber;
+            tableDef.PrimaryKeyIndexUmapPage   = pkIndex.UsedPagesUmapPage;
+            tableDef.PrimaryKeyIndexUmapRow    = pkIndex.UsedPagesUmapRow;
             if (pkIndex.Columns.Count == 1)
                 tableDef.PrimaryKeyColumnName = pkIndex.Columns[0].Column.Name;
             else

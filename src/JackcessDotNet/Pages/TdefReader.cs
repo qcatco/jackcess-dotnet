@@ -91,6 +91,9 @@ internal static class TdefReader
             // Honour the on-disk offsets so post-deletion tables decode correctly.
             col.FixedDataOffset  = dataType.IsVariableLength() ? (short)-1 : fixedOffset;
             col.VarLenTableIndex = dataType.IsVariableLength() ? varIndex     : (short)-1;
+            // Jet4's extended flags follow the flags byte; bit 0 is "Unicode Compression".
+            col.IsCompressedUnicode = format.Version != JetVersion.Jet3
+                && (page[p + format.OffsetColumnFlags + 1] & 0x01) != 0;
             columns.Add(col);
         }
 
@@ -177,7 +180,7 @@ internal static class TdefReader
 
     /// <summary>Intermediate record: one decoded index column block.</summary>
     private readonly record struct IndexDataRecord(
-        IReadOnlyList<IndexColumn> Columns, int RootPageNumber, byte Flags);
+        IReadOnlyList<IndexColumn> Columns, int RootPageNumber, byte Flags, int UmapPage, int UmapRow);
 
     /// <summary>Intermediate record: one decoded logical-index slot.</summary>
     private readonly record struct IndexSlotRecord(int IndexNumber, int IndexDataNumber, byte IndexType);
@@ -212,13 +215,15 @@ internal static class TdefReader
                 idxCols.Add(new IndexColumn(col, cFlags));
             }
 
-            p += 4;   // UsageMap ref (1-byte row + 3-byte page)
+            int umapRow  = page[p];                         // used-pages UsageMap ref:
+            int umapPage = ByteUtil.Get3ByteInt(page, p + 1); // 1-byte row + 3-byte page
+            p += 4;
             int rootPage = ByteUtil.GetInt(page, p); p += 4;
             p += format.SkipBeforeIndexFlags;
             byte indexFlags = page[p]; p += 1;
             // SkipAfterIndexFlags absorbed by the deterministic block-size advance below.
 
-            indexData[i] = new IndexDataRecord(idxCols, rootPage, indexFlags);
+            indexData[i] = new IndexDataRecord(idxCols, rootPage, indexFlags, umapPage, umapRow);
             pos = blockStart + format.SizeIndexColumnBlock;
         }
 
@@ -260,7 +265,10 @@ internal static class TdefReader
                 rootPageNumber: data.RootPageNumber,
                 indexNumber:    slot.IndexNumber,
                 flags:          data.Flags,
-                indexType:      slot.IndexType));
+                indexType:      slot.IndexType,
+                indexDataNumber:   slot.IndexDataNumber,
+                usedPagesUmapPage: data.UmapPage,
+                usedPagesUmapRow:  data.UmapRow));
         }
         return indexes;
     }
@@ -301,5 +309,6 @@ internal static class TdefReader
             ColumnNumber     = src.ColumnNumber,
             FixedDataOffset  = src.FixedDataOffset,
             VarLenTableIndex = src.VarLenTableIndex,
+            IsCompressedUnicode = src.IsCompressedUnicode,
         };
 }

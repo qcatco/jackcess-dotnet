@@ -41,8 +41,17 @@ public sealed class TableDefinition
     public int FreeSpaceRow     { get; set; }
 
     // ── Primary-key index (optional) ─────────────────────────────────────────
-    /// <summary>Page number of the primary key index leaf page (0 if no primary key index).</summary>
+    /// <summary>Page number of the primary key index's root page (0 if no primary key index).</summary>
     public int     PrimaryKeyIndexPage   { get; set; }
+    /// <summary>The primary key's block among the TDEF's index blocks: 0 for a table this library makes.</summary>
+    internal int   PrimaryKeyIndexDataNumber { get; set; }
+    /// <summary>
+    /// The usage map listing the primary key's index pages: its page (0 when there
+    /// is none) and row. A table this library makes keeps it on its own usage-map
+    /// page, in the row after the free-space map, as Access does.
+    /// </summary>
+    internal int   PrimaryKeyIndexUmapPage   { get; set; }
+    internal int   PrimaryKeyIndexUmapRow    { get; set; }
     /// <summary>
     /// Name of the primary key column for single-column PKs (null when there's
     /// no PK <i>or</i> the PK is composite). For composite PKs use
@@ -243,7 +252,8 @@ public sealed class TableDefinition
                 flags |= (col.DataType == DataType.Guid ? ColumnFlagAutoNumberGuid : ColumnFlagAutoNumber);
 
             page[pos++] = flags;
-            page[pos++] = 0x00;   // ext flags
+            // Ext flags: bit 0 is "Unicode Compression", which Access sets on its new Text and Memo fields.
+            page[pos++] = (byte)((col.DataType is DataType.Text or DataType.Memo) && col.IsCompressedUnicode ? 0x01 : 0x00);
             ByteUtil.PutInt  (page, pos, 0); pos += 4;
             ByteUtil.PutShort(page, pos, col.DataType.IsVariableLength() ? (short)0 : fixedOffsets[col]); pos += 2;
             ByteUtil.PutShort(page, pos, col.DataType.IsLongValue()      ? (short)0 : (short)col.Length); pos += 2;
@@ -297,7 +307,9 @@ public sealed class TableDefinition
                     page[p++] = 0x00;
                 }
             }
-            // UsageMap ref (4 bytes: row + 3-byte page) — empty for us.
+            // The index's used-pages UsageMap ref (1-byte row + 3-byte page).
+            page[p] = (byte)PrimaryKeyIndexUmapRow;
+            ByteUtil.Put3ByteInt(page, p + 1, PrimaryKeyIndexUmapPage);
             p += 4;
             // Root page = PK index leaf page.
             ByteUtil.PutInt(page, p, PrimaryKeyIndexPage); p += 4;

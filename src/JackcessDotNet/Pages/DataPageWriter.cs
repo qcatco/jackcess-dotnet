@@ -40,9 +40,7 @@ public sealed class DataPageWriter
     /// for <paramref name="tableDef"/>.  Allocates a new data page if needed and
     /// registers it in the table's owned-pages usage-map.
     /// </summary>
-    /// <returns>
-    /// A packed row-pointer: <c>pageNumber &lt;&lt; 16 | rowIndexOnPage</c>.
-    /// </returns>
+    /// <returns>The row's pointer (<see cref="RowPointer"/>: its page and its row on it).</returns>
     public int InsertRow(TableDefinition tableDef, Row row)
     {
         if (tableDef is null) throw new ArgumentNullException(nameof(tableDef));

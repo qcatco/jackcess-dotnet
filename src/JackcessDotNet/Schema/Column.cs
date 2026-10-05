@@ -51,6 +51,15 @@ public sealed class Column
     /// <summary>0-based index into the variable-length offset table; -1 for fixed columns.</summary>
     public short VarLenTableIndex { get; internal set; } = -1;
 
+    /// <summary>
+    /// Whether a Text or Memo value may be written in Jet's compressed form (0xFF 0xFE,
+    /// then one byte per character): the column's "Unicode Compression" setting, read
+    /// from its TDEF. Access reads a value in that form as UTF-16 in a column without
+    /// it, so MSysObjects' names, for one, are written uncompressed. Columns this
+    /// library creates allow it, as Access's own new Text and Memo fields do.
+    /// </summary>
+    public bool IsCompressedUnicode { get; internal set; } = true;
+
     internal Column(
         string name,
         DataType dataType,

@@ -31,48 +31,43 @@ internal static class UsageMap
     // ── Page initialization ───────────────────────────────────────────────────
 
     /// <summary>
-    /// Creates a fresh Usage-Map page that holds two empty inline maps:
+    /// Creates a fresh page holding two empty inline maps:
     ///   row 0 = owned-pages map
     ///   row 1 = free-space map
+    /// The maps are rows of an ordinary data page (type 0x01, owned by no table), as
+    /// Access and Jackcess write them; type 0x05 is only a reference map's bitmap page.
+    /// Access does not read a table whose maps are on a page of type 0x05.
     /// </summary>
     public static byte[] CreateUmapPage(JetFormat format)
         => CreateUmapPage(format, format.UmapInlineBitmapSize);
 
     /// <summary>
-    /// As <see cref="CreateUmapPage(JetFormat)"/>, with inline bitmaps of <paramref name="bitmapSize"/> bytes:
-    /// Access's own are 64.
+    /// As <see cref="CreateUmapPage(JetFormat)"/>, with inline bitmaps of <paramref name="bitmapSize"/> bytes
+    /// (Access's own are 64) and <paramref name="rows"/> empty maps: Access keeps a table's index maps on its
+    /// usage-map page too, in the rows after the owned-pages and free-space maps.
     /// </summary>
-    public static byte[] CreateUmapPage(JetFormat format, int bitmapSize)
+    public static byte[] CreateUmapPage(JetFormat format, int bitmapSize, int rows = 2)
     {
         int rowDataSize = 1 + 4 + bitmapSize;   // MAP_TYPE + startPage + bitmap
         var page = new byte[format.PageSize];
 
-        // Page header
-        page[0] = JetFormat.PageTypeUsageMap;
+        // Page header: a data page owned by no table (bytes 4-7 are 0)
+        page[0] = JetFormat.PageTypeData;
         page[1] = 0x01;
-        // bytes 4-7 are 0 (no owning TDEF)
 
-        // Write two rows, packed from the end of the page
+        // Rows packed from the end of the page: row 0 at the highest address. Each is
+        // an empty inline map: MAP_TYPE, start page 0, a zeroed bitmap.
         int cursor = format.PageSize;
-
-        // Row 0 (owned pages) – written first = at higher address
-        cursor -= rowDataSize;
-        int row0Start = cursor;
-        page[row0Start] = MapTypeInline;   // MAP_TYPE
-        // start-page = 0, bitmap = all zeros (already zeroed)
-
-        // Row 1 (free-space pages) – written second = at lower address
-        cursor -= rowDataSize;
-        int row1Start = cursor;
-        page[row1Start] = MapTypeInline;
-
-        // Slot table at OffsetDataRowTable (Jet3=10, Jet4=14)
-        ByteUtil.PutShort(page, format.OffsetDataRowTable,                   (short)row0Start);
-        ByteUtil.PutShort(page, format.OffsetDataRowTable + JetFormat.SizeRowEntry, (short)row1Start);
+        for (int row = 0; row < rows; row++)
+        {
+            cursor -= rowDataSize;
+            page[cursor] = MapTypeInline;
+            ByteUtil.PutShort(page, format.OffsetDataRowTable + row * JetFormat.SizeRowEntry, (short)cursor);
+        }
 
         // Row count and free space
-        ByteUtil.PutShort(page, format.OffsetDataNumRows, 2);
-        int freeSpace = row1Start - format.OffsetDataRowTable - 2 * JetFormat.SizeRowEntry;
+        ByteUtil.PutShort(page, format.OffsetDataNumRows, (short)rows);
+        int freeSpace = cursor - format.OffsetDataRowTable - rows * JetFormat.SizeRowEntry;
         ByteUtil.PutShort(page, JetFormat.OffsetDataFreeSpace, (short)freeSpace);
 
         return page;

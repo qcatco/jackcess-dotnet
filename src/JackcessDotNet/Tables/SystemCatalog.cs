@@ -5,20 +5,21 @@ namespace JackcessDotNet;
 /// <summary>
 /// Reads from and writes to the MSysObjects system catalog (TDEF always at page 2).
 ///
-/// On table creation the following row is appended to the MSysObjects data page:
-///   Id         = TDEF page number of the new table
-///   Name       = table name
-///   Type       = 1  (CatalogTypeTable)
-///   DateCreate = now
-///   DateUpdate = now
-///   ParentId   = 0
-///   Flags      = 0
-///   (all other columns remain NULL)
+/// A table is registered the way Access registers one it creates, or Access
+/// cannot find it:
+///   • a row in MSysObjects: Id = its TDEF page, Name, Type 1, DateCreate and
+///     DateUpdate = now, ParentId = the "Tables" container's Id, Flags 0, and
+///     Owner = the Admin user (all other columns NULL);
+///   • that row's entries in MSysObjects' indexes (Id, and ParentIdName, through
+///     which Access finds a table by name);
+///   • rows in MSysACEs giving the new table the permissions the Tables container
+///     passes on, with their entries in MSysACEs' index.
 /// </summary>
 public sealed class SystemCatalog
 {
     private readonly PageFile       _file;
     private readonly JetFormat      _format;
+    private readonly PageAllocator  _allocator;
     private readonly DataPageWriter _writer;
 
     // Well-known MSysObjects column names
@@ -30,12 +31,32 @@ public sealed class SystemCatalog
     private const string ColParentId   = "ParentId";
     private const string ColFlags      = "Flags";
     private const string ColLvProp     = "LvProp";
+    private const string ColOwner      = "Owner";
+
+    // MSysACEs' columns
+    private const string AceAcm         = "ACM";
+    private const string AceInheritable = "FInheritable";
+    private const string AceObjectId    = "ObjectId";
+    private const string AceSid         = "SID";
+
+    /// <summary>The ParentId of the top-level containers ("Tables", "Databases", ...).</summary>
+    private const int DatabaseParentId = 0x0F000000;
+    private const short CatalogTypeContainer = 3;
+
+    /// <summary>
+    /// The permissions a SID holds on the Tables container, passed on to tables
+    /// created in it, that Access gives it on a new table: in the Access-made
+    /// tables of the test corpus, a table has one ACE for each inheritable
+    /// container ACE holding all of these bits, with the same ACM.
+    /// </summary>
+    private const int TableFullAccess = 0x000FFEFF;
 
     public SystemCatalog(PageFile file)
     {
-        _file   = file   ?? throw new ArgumentNullException(nameof(file));
-        _format = file.Format;
-        _writer = new DataPageWriter(file, new PageAllocator(file));
+        _file      = file   ?? throw new ArgumentNullException(nameof(file));
+        _format    = file.Format;
+        _allocator = new PageAllocator(file);
+        _writer    = new DataPageWriter(file, _allocator);
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -46,25 +67,147 @@ public sealed class SystemCatalog
     }
 
     /// <summary>
-    /// Appends a user-table entry to MSysObjects.
+    /// Registers a new user table: its MSysObjects row and index entries, and its
+    /// permissions in MSysACEs (see the class summary).
     /// </summary>
     public void InsertTableEntry(string tableName, int tdefPageNumber)
     {
         var catalogDef = BuildCatalogTableDef();
+        var catalog    = ReadRows(catalogDef, ColId, ColName, ColType, ColParentId, ColOwner);
 
+        var tables = catalog.FirstOrDefault(r =>
+                Value(r, ColType) is short type && type == CatalogTypeContainer
+                && Value(r, ColParentId) is int parent && parent == DatabaseParentId
+                && Value(r, ColName) is string name && name == "Tables")
+            ?? throw new InvalidDataException("MSysObjects has no Tables container to put a table in.");
+        int tablesId = (int)Value(tables, ColId)!;
+        byte[]? owner = AdminOwner(catalog);
+
+        int acesTdef = FindTableTdefPage("MSysACEs");
+        var acesDef  = acesTdef >= 0 ? BuildTableDef("MSysACEs", acesTdef) : null;
+
+        // Every index must be one this library can write a key for, before anything is written.
+        EnsureKeysCanBeWritten(catalogDef);
+        if (acesDef is not null) EnsureKeysCanBeWritten(acesDef);
+
+        var now = DateTime.Now;
         var row = new Row
         {
             [ColId]         = tdefPageNumber,
             [ColName]       = tableName,
             [ColType]       = (short)JetFormat.CatalogTypeTable,
-            [ColDateCreate] = DateTime.Now,
-            [ColDateUpdate] = DateTime.Now,
-            [ColParentId]   = 0,
+            [ColDateCreate] = now,
+            [ColDateUpdate] = now,
+            [ColParentId]   = tablesId,
             [ColFlags]      = 0
         };
+        if (owner is not null) row[ColOwner] = owner;
 
-        _writer.InsertRow(catalogDef, row);
+        int rowPtr = _writer.InsertRow(catalogDef, row);
         _writer.IncrementTdefRowCount(JetFormat.PageSystemCatalog);
+        AddIndexEntries(catalogDef, row, rowPtr);
+
+        if (acesDef is not null)
+            InsertAccessControlEntries(acesDef, tablesId, tdefPageNumber, owner);
+    }
+
+    /// <summary>
+    /// Gives the new object <paramref name="objectId"/> an ACE, not inheritable, for
+    /// each inheritable ACE of the Tables container holding <see cref="TableFullAccess"/>,
+    /// with that ACE's SID and ACM - what Access writes for a table it creates. A
+    /// container without one gives the owner those permissions.
+    /// </summary>
+    private void InsertAccessControlEntries(TableDefinition acesDef, int tablesId, int objectId, byte[]? owner)
+    {
+        var granted = ReadRows(acesDef, AceAcm, AceInheritable, AceObjectId, AceSid)
+            .Where(ace => Value(ace, AceObjectId) is int id && id == tablesId
+                       && Value(ace, AceInheritable) is true
+                       && Value(ace, AceAcm) is int acm && (acm & TableFullAccess) == TableFullAccess
+                       && Value(ace, AceSid) is byte[])
+            .Select(ace => ((int)Value(ace, AceAcm)!, (byte[])Value(ace, AceSid)!))
+            .ToList();
+        if (granted.Count == 0 && owner is not null)
+            granted.Add((TableFullAccess, owner));
+
+        foreach (var (acm, sid) in granted)
+        {
+            var ace = new Row
+            {
+                [AceAcm]         = acm,
+                [AceInheritable] = false,
+                [AceObjectId]    = objectId,
+                [AceSid]         = sid,
+            };
+            int rowPtr = _writer.InsertRow(acesDef, ace);
+            _writer.IncrementTdefRowCount(acesDef.TdefPageNumber);
+            AddIndexEntries(acesDef, ace, rowPtr);
+        }
+    }
+
+    /// <summary>
+    /// The Admin user's SID, which Access makes a new table's owner. A file keeps its
+    /// SIDs encoded with a key of its own; the Admin user's is the system objects'
+    /// owner with 0x0102 mixed in, in every Access-made table of the test corpus
+    /// (Access 97 to 2019). Null when MSysObjects' own owner is not a 2-byte SID.
+    /// </summary>
+    private static byte[]? AdminOwner(IEnumerable<Row> catalog)
+    {
+        var system = catalog.FirstOrDefault(r =>
+            Value(r, ColName) is string name && name == "MSysObjects"
+            && Value(r, ColType) is short type && type == JetFormat.CatalogTypeTable);
+        return system is not null && Value(system, ColOwner) is byte[] { Length: 2 } sid
+            ? new[] { (byte)(sid[0] ^ 0x01), (byte)(sid[1] ^ 0x02) }
+            : null;
+    }
+
+    private static object? Value(Row row, string column) => row.TryGetValue(column, out var value) ? value : null;
+
+    private static void EnsureKeysCanBeWritten(TableDefinition def)
+    {
+        foreach (var index in def.Indexes)
+            foreach (var column in index.Columns)
+                if (!IndexKeys.CanEncode(column.Column.DataType))
+                    throw new NotSupportedException(
+                        $"{def.Name}'s index {index.Name} is on a {column.Column.DataType} column; its entries cannot be written.");
+    }
+
+    /// <summary>
+    /// Adds the row's entry to each of the table's indexes: once per index block, as
+    /// two logical indexes can share one.
+    /// </summary>
+    private void AddIndexEntries(TableDefinition def, Row row, int rowPtr)
+    {
+        var writer = new IndexWriter(_file, _allocator);
+        foreach (var index in def.Indexes.GroupBy(ix => ix.IndexDataNumber).Select(g => g.First()))
+        {
+            var values = index.Columns.Select(c => Value(row, c.Column.Name)).ToArray();
+            writer.Insert(IndexWriter.Target.For(def.TdefPageNumber, index), IndexKeys.Encode(index.Columns, values), rowPtr);
+        }
+    }
+
+    /// <summary>The <paramref name="columns"/> of every row of the table <paramref name="def"/> describes.</summary>
+    private List<Row> ReadRows(TableDefinition def, params string[] columns)
+    {
+        var wanted  = def.Columns.Where(c => columns.Contains(c.Name, StringComparer.OrdinalIgnoreCase)).ToList();
+        var decoder = new RowDecoder(_format, def.Columns);
+        var rows    = new List<Row>();
+
+        byte[] umapPage = _file.ReadPage(def.UmapPageNumber);
+        foreach (int pageNum in UsageMap.GetOwnedPages(umapPage, def.OwnedPagesRow, _format, _file))
+        {
+            byte[] dp       = _file.ReadPage(pageNum);
+            int    rowCount = ByteUtil.GetShort(dp, _format.OffsetDataNumRows);
+            for (int r = 0; r < rowCount; r++)
+            {
+                byte[]? rowBytes = ReadRowBytes(dp, r, _format);
+                if (rowBytes is null) continue;
+                var row = new Row();
+                foreach (var column in wanted)
+                    row[column.Name] = decoder.Decode(rowBytes, column);
+                rows.Add(row);
+            }
+        }
+        return rows;
     }
 
     // Flags stored on each MSysObjects row; matches Jackcess constants.
@@ -366,17 +509,20 @@ public sealed class SystemCatalog
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private TableDefinition BuildCatalogTableDef()
+    private TableDefinition BuildCatalogTableDef() => BuildTableDef("MSysObjects", JetFormat.PageSystemCatalog);
+
+    private TableDefinition BuildTableDef(string name, int tdefPageNumber)
     {
-        byte[] tdefPage = _file.ReadPage(JetFormat.PageSystemCatalog);
+        byte[] tdefPage = _file.ReadPage(tdefPageNumber);
         var    info     = TdefReader.Read(tdefPage, _format);
 
-        return new TableDefinition("MSysObjects", info.Columns)
+        return new TableDefinition(name, info.Columns)
         {
-            TdefPageNumber = JetFormat.PageSystemCatalog,
+            TdefPageNumber = tdefPageNumber,
             UmapPageNumber = info.OwnedPagesUmapPage,
             OwnedPagesRow  = info.OwnedPagesUmapRow,
             FreeSpaceRow   = info.FreeSpaceUmapRow,
+            Indexes        = info.Indexes,
         };
     }
 

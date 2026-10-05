@@ -270,6 +270,10 @@ public sealed class RowEncoder
         return lvRef;
     }
 
+    // Compressed only where the column allows it (see Column.IsCompressedUnicode).
+    private static byte[] EncodeText(Column col, string text)
+        => col.IsCompressedUnicode ? Util.ByteUtil.EncodeText(text) : System.Text.Encoding.Unicode.GetBytes(text);
+
     private byte[] WriteVariableValue(Column col, object value)
     {
         switch (col.DataType)
@@ -277,7 +281,7 @@ public sealed class RowEncoder
             case DataType.Text:
                 if (_format.Version == JetVersion.Jet3)
                     return _format.TextEncoding.GetBytes(Convert.ToString(value) ?? string.Empty);
-                return Util.ByteUtil.EncodeText(Convert.ToString(value) ?? string.Empty);
+                return EncodeText(col, Convert.ToString(value) ?? string.Empty);
             case DataType.Binary:
                 return (byte[])value;
             case DataType.Memo:
@@ -285,7 +289,7 @@ public sealed class RowEncoder
                 string text = Convert.ToString(value) ?? string.Empty;
                 byte[] textBytes = _format.Version == JetVersion.Jet3
                     ? _format.TextEncoding.GetBytes(text)
-                    : Util.ByteUtil.EncodeText(text);
+                    : EncodeText(col, text);
                 // Small values are stored inline in the row (THIS_PAGE), like
                 // real Access and upstream Jackcess; only genuinely large
                 // values go to LVAL pages. LVAL-bound text is stored as plain

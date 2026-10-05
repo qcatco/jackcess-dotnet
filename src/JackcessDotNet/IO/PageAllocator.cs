@@ -10,11 +10,15 @@ public sealed class PageAllocator
     public PageAllocator(PageFile file)
         => _file = file ?? throw new ArgumentNullException(nameof(file));
 
-    /// <summary>Appends a blank page and returns its page number.</summary>
+    /// <summary>
+    /// Appends a blank page and returns its page number. The page leaves the
+    /// database's global usage map of free pages, or Access would hand it out again.
+    /// </summary>
     public int AllocatePage()
     {
         int pageNumber = _file.PageCount;
         _file.WritePage(pageNumber, new byte[_file.Format.PageSize]);
+        GlobalUsageMap.MarkUsed(_file, pageNumber);
         return pageNumber;
     }
 
@@ -65,14 +69,17 @@ public sealed class PageAllocator
     }
 
     /// <summary>
-    /// Allocates a new Usage-Map page (type 0x05) with two empty inline maps
+    /// Allocates a new page of usage maps (an ordinary data page, see UsageMap.CreateUmapPage) with two empty inline maps
     /// (owned-pages map at row 0, free-space map at row 1), and returns its page number.
     /// </summary>
-    public int AllocateUmapPage()
+    public int AllocateUmapPage() => AllocateUmapPage(rows: 2);
+
+    /// <summary>As <see cref="AllocateUmapPage()"/>, with <paramref name="rows"/> empty maps.</summary>
+    public int AllocateUmapPage(int rows)
     {
         var format     = _file.Format;
         int pageNumber = AllocatePage();
-        _file.WritePage(pageNumber, UsageMap.CreateUmapPage(format));
+        _file.WritePage(pageNumber, UsageMap.CreateUmapPage(format, format.UmapInlineBitmapSize, rows));
         return pageNumber;
     }
 }
